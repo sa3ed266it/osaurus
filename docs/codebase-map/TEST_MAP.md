@@ -1,0 +1,55 @@
+# Test Map
+
+Test names and lanes below were checked in the repository. Commands are marked as configuration-verified when they appear in Makefile, package manifests, or CI. No test command was run while preparing this documentation map.
+
+## Feature to tests
+
+| Change area | Focused tests or suites | Broader regression lane |
+|---|---|---|
+| Chat send, stream, stop, transcript persistence | [Tests/Chat](../../Packages/OsaurusCore/Tests/Chat): ChatEngineTests, ChatSessionStopTests, ChatSessionQueuedSendTests, StreamingDeltaProcessorTests, ChatHistoryDatabaseTests, ChatSessionStoreDeferredSaveTests, ChatSessionStoreTranscriptRecoveryTests | OsaurusCore package suite; relevant UI test target only when UI behavior is involved |
+| Composer and chat layout | [Tests/Chat](../../Packages/OsaurusCore/Tests/Chat): EditableTextViewFocusLockTests, ResponsiveChatTypographyTests, ChatWindowStateMinimumSizeTests (screen-size floor/clamp), ChatTabLayoutPersistenceTests (saved tab layout) | No focused unit/UI test for the `ChatView.chatHeader` titlebar-to-transcript gap is mapped. UI target osaurusUITests exists, but its current tests are launch-oriented/placeholders; inspect before relying on it |
+| Agent loop and tool completion | [Tests/Chat](../../Packages/OsaurusCore/Tests/Chat): AgentToolLoopTests, AgentLoopBudgetTests, AgentTaskStateTests, LocalToolCompletionContractTests, ChatToolChoicePolicyTests, ToolFlowTrueFixTests; [Tests/AgentDelegation](../../Packages/OsaurusCore/Tests/AgentDelegation); [Tests/Subagent](../../Packages/OsaurusCore/Tests/Subagent) | Evals suites AgentLoop, AgentLoopFrontier, and Subagent; broader proof lane is make evals-pr-report |
+| Prompt and tool exposure | [Tests/Chat](../../Packages/OsaurusCore/Tests/Chat): SystemPromptComposerToolResolutionTests, PromptSurfaceMatrixTests, ConfigureToolExposureTests; [Tests/Tool](../../Packages/OsaurusCore/Tests/Tool): ToolExposureControlCenterTests, ToolExecutionSurfaceTests, ToolRegistryAutoApproveTests | OsaurusCore suite; add matching AgentLoop/ToolResultGrounding evals when execution contract changes |
+| Search cascade and extraction | [Tests/Search](../../Packages/OsaurusCore/Tests/Search): SearchEngineCascadeTests, SearchDiagnosticsExtractionTests, SearchProviderConfigurationTests, DeclarativeSearchBackendTests, NativeSearchBackendTests, WebSearchToolTests | `SearchDiagnosticsExtractionTests` covers local fetch/extraction outcomes; `WebSearchToolTests` covers extraction result envelopes and failure/partial-success semantics. No direct test for `SearchProviderManager.runHostedFirstSearch` query-mode hosted-text/fallback orchestration is currently present. Use Evals CapabilitySearch or the relevant search suite when search behavior changes. |
+| Browser use | [Tests/Browser](../../Packages/OsaurusCore/Tests/Browser): BrowserGatingTests, BrowserSupportTests, BrowserWebKitSmokeTests, BrowserSubagentTests | Evals BrowserUse and, for loop changes, ComputerUseLoop/AgentLoop as applicable |
+| Model discovery, load, routing, reasoning | [Tests/Model](../../Packages/OsaurusCore/Tests/Model) and [Tests/Service](../../Packages/OsaurusCore/Tests/Service): ModelManagerResolveTests, ModelRuntimeFallbackTests, ModelRuntimeMappingTests, InferenceLoadCoordinatorTests, MLXServiceRuntimePolicyTests, ModelResidencyManagerTests; [Tests/Chat](../../Packages/OsaurusCore/Tests/Chat): AgentReasoningPolicyTests | Model/runtime-specific evals and live proof required by root AGENTS.md for runtime-affecting changes |
+| Remote providers and APIs | [Tests/Provider](../../Packages/OsaurusCore/Tests/Provider): RemoteProviderCancellationTests, RemoteChatRequestEncodingTests, RemoteReasoningPolicyTests, OpenAICompatibleStreamParserTests, ResponsesNativeProviderTests; [Tests/Networking](../../Packages/OsaurusCore/Tests/Networking) | OsaurusCore suite plus endpoint/provider-specific tests |
+| MCP and plugins | [Tests/Provider](../../Packages/OsaurusCore/Tests/Provider): MCPProviderToolNamingTests, MCPToolEnablementPersistenceTests; [Tests/MCPOAuth](../../Packages/OsaurusCore/Tests/MCPOAuth), [Tests/Plugin](../../Packages/OsaurusCore/Tests/Plugin), and [Tests/Skill](../../Packages/OsaurusCore/Tests/Skill) | OsaurusCore suite; plugin host/package tests when ABI or host behavior changes |
+| Memory, knowledge, projects | [Tests/Memory](../../Packages/OsaurusCore/Tests/Memory), [Tests/Knowledge](../../Packages/OsaurusCore/Tests/Knowledge), Chat tests HostContinuationMemoryProvenanceTests and ProjectFolderSandboxConflictTests | Evals Memory, AgentDB, and WorkspaceDelegation only when their contracts are affected |
+| Identity, sandbox, storage | [Tests/Identity](../../Packages/OsaurusCore/Tests/Identity), [Tests/Sandbox](../../Packages/OsaurusCore/Tests/Sandbox), [Tests/Storage](../../Packages/OsaurusCore/Tests/Storage), [Tests/ComputerUse](../../Packages/OsaurusCore/Tests/ComputerUse) | Relevant package and security regression lane; include live UI proof when user-facing permission/settings behavior changes |
+| Settings and declarative config | [Tests/Configuration](../../Packages/OsaurusCore/Tests/Configuration): SettingsSearchIndexTests, SettingsSearchSelfFindProbe.swift, AppConfigurationMigrationTests, DeclarativeConfigTests, ConfigManifestTests | OsaurusCore suite; catalog changes must also update the control anchor and guide per root AGENTS.md |
+| Package-specific code | Tests colocated under each package's Tests directory | Corresponding CI job in [.github/workflows/ci.yml](../../.github/workflows/ci.yml) |
+
+## Local model tool-call diagnostic tests
+
+Use these by failing boundary; they do not all exercise a real local model turn:
+
+- [ToolFlowTrueFixTests.swift](../../Packages/OsaurusCore/Tests/Chat/ToolFlowTrueFixTests.swift) — verifies tool exposure under manual-mode, web-search grant, and explicit-pick conditions. It covers schema resolution, not local model parsing or execution.
+- [ChatToolChoicePolicyTests.swift](../../Packages/OsaurusCore/Tests/Chat/ChatToolChoicePolicyTests.swift) — verifies when user intent makes tool choice required versus automatic. It does not exercise a model response.
+- [MLXServiceRuntimePolicyTests.swift](../../Packages/OsaurusCore/Tests/Service/MLXServiceRuntimePolicyTests.swift) — verifies bundle tool-support metadata and request preflight without loading/generating; it does not prove a bundle's parser emits a call.
+- [ToolCallProcessorFuzzTests.swift](../../Packages/OsaurusCore/Tests/Service/ToolCallProcessorFuzzTests.swift) — fuzzes prose preservation and tool-envelope detection through the imported MLXLMCommon parser API. The production parser implementation belongs to pinned upstream vmlx-swift, not this repository.
+- [GenerationEventMapperTests.swift](../../Packages/OsaurusCore/Tests/Service/GenerationEventMapperTests.swift) — verifies runtime `.toolCall` events become serialized app tool invocations, including progress and batch bridging. It does not verify model-side dialect parsing.
+- [LocalToolCompletionContractTests.swift](../../Packages/OsaurusCore/Tests/Chat/LocalToolCompletionContractTests.swift) — uses a fake tool-capable service to verify ChatEngine preserves multiple calls, reasoning, and runtime usage in completion/streaming contracts; it does not run MLX or execute tools through ToolRegistry.
+
+## Configuration-verified commands
+
+The following commands are present in [Makefile](../../Makefile) or CI configuration. “Verified” here means the command/lane exists in repository configuration; these were not executed for this docs-only task.
+
+- Targeted OsaurusCore test: set the keychain/model isolation variables from root [AGENTS.md](../../AGENTS.md), then run **swift test --package-path Packages/OsaurusCore --filter TestName**.
+- Core suite: **make test** runs **swift test --package-path Packages/OsaurusCore**. The root instructions call this the fast unit loop; [.cursor testing workflow](../../.cursor/rules/testing-workflow.mdc) notes that the full suite is lengthy and recommends filters during development.
+- CI-equivalent Core lane: **make ci-test** invokes xcodebuild with the OsaurusCoreTests scheme and xcbeautify.
+- Other package suites: **swift test --package-path Packages/OsaurusCLI**, **Packages/OsaurusRepository**, **Packages/OsaurusPluginTestKit**, **Packages/OsaurusNetworking**, or **Packages/OsaurusPlugins/StatsPack**. Confirmed CI coverage includes CLI, repository/plugin test kit, StatsPack, and eval harness jobs; Networking is a standalone test package.
+- Evals harness unit tests: **make evals-test** runs the deterministic, token-free OsaurusEvals package tests. This does not run model behavior eval suites.
+- One eval suite: **make evals EVALS_SUITE=Packages/OsaurusEvals/Suites/AgentLoop** (the Makefile forwards the suite directory to the eval CLI; model/runtime requirements depend on the suite).
+- All suite directories: **make evals-all**. This is broad and can run model-, network-, or host-dependent evals.
+- Agent-loop proof report: **make evals-pr-report** requests local/frontier lanes and AgentLoop, AgentLoopFrontier, and Subagent by default; model and judge availability affect what can run.
+- App/CLI builds: **make cli** and **make app**; the app target also embeds CLI and plugin-host helpers.
+
+## Suggested validation order
+
+1. Run the narrowest relevant test filter while changing implementation.
+2. Run the package suite if shared package behavior or adjacent consumers changed.
+3. Run broader eval suites when agent loop, delegation, search, browser, tool, model, cache, or runtime contracts changed.
+4. Follow root AGENTS.md for app builds/live proof and runtime evidence. Source checks and unit tests alone are not release proof for runtime or user-setting changes.
+
+Do not report these lanes as passing unless they were actually run and their results were inspected. If a command needs model assets, host permissions, external credentials, or a live app, record that prerequisite separately from the source-verified test mapping.

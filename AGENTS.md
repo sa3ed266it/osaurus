@@ -216,3 +216,17 @@ sufficient:
   current session, keep status artifacts current, and use normal shell, test,
   build, and proof commands for evidence. Python is allowed for deterministic
   parsing or proof harnesses, but never to recursively run another agent.
+
+## Codebase Navigation
+
+For every task, start with [docs/codebase-map/README.md](docs/codebase-map/README.md) and [docs/codebase-map/CHANGE_ROUTER.md](docs/codebase-map/CHANGE_ROUTER.md). Then:
+
+1. Identify the requested feature and owner in the navigation index.
+2. Inspect only the smallest relevant source files and tests first.
+3. Expand into neighboring files only when a traced dependency requires it.
+4. Do not run a repository-wide scan by default for a small change.
+5. Reuse existing services, managers, and components; avoid duplicate implementations.
+6. Keep runtime logic unchanged unless the user explicitly requests a behavior change.
+7. Run targeted validation before considering broader regression lanes.
+8. Update relevant map entries whenever an implementation change invalidates them.
+9. Report exactly which files were inspected, changed, and validated.
