@@ -2,7 +2,7 @@
 //  FloatingInputCard.swift
 //  osaurus
 //
-//  Premium floating input card with model chip and smooth animations
+//  Premium floating input card with model selection and smooth animations
 //
 
 import AVFoundation
@@ -45,14 +45,6 @@ struct FloatingInputCard: View {
     var contextBreakdown: ContextBreakdown = .zero
     /// Total micro-USD spent on the Osaurus Router this session.
     var sessionSpendMicro: Int = 0
-    /// "N cached · P%" label for this session's router prompt-cache hits
-    /// (see `OsaurusRouter.formatCachedInputLabel`); nil hides the line.
-    var sessionCachedInputLabel: String? = nil
-    /// True when this session's spend is billed via the Osaurus Router (the
-    /// managed cloud provider is the selected model). Drives the credits chip's
-    /// low/empty escalation and the wallet panel's session-spend row; the chip
-    /// itself is shown in every session where the router is usable.
-    var isRouterBilledSession: Bool = false
     /// Workspace name when this tab chats with a teammate's shared agent. The
     /// run is billed to that workspace's pool (relayed by the host), so the
     /// composer shows a dedicated "Workspace pool" spend chip that ticks live
@@ -124,8 +116,6 @@ struct FloatingInputCard: View {
     var onSendNow: (() -> Void)?
     /// Discard the queued send without sending it. Called by the chip's ×.
     var onCancelQueued: (() -> Void)?
-    /// Invoked by the wallet panel's "Add credits" button (opens the top-up sheet).
-    var onAddCredits: (() -> Void)?
     /// Mode 2 (remote agent run): the model is pinned to the remote agent's own
     /// model and the user must not change it. Renders the model chip as a
     /// non-interactive label (no chevron / popover) and disables the `/model`
@@ -195,8 +185,6 @@ struct FloatingInputCard: View {
         appliesAgentReasoningDefault: Bool = false,
         contextBreakdown: ContextBreakdown = .zero,
         sessionSpendMicro: Int = 0,
-        sessionCachedInputLabel: String? = nil,
-        isRouterBilledSession: Bool = false,
         workspacePoolLabel: String? = nil,
         workspacePoolId: String? = nil,
         imageComposerSettings: Binding<ImageComposerSettings> = .constant(ImageComposerSettings()),
@@ -220,7 +208,6 @@ struct FloatingInputCard: View {
         queuedSend: Binding<QueuedSend?> = .constant(nil),
         onSendNow: (() -> Void)? = nil,
         onCancelQueued: (() -> Void)? = nil,
-        onAddCredits: (() -> Void)? = nil,
         isModelPinned: Bool = false,
         pinnedModelLabel: String? = nil,
         remoteConnectionPending: Bool = false,
@@ -250,8 +237,6 @@ struct FloatingInputCard: View {
         self.appliesAgentReasoningDefault = appliesAgentReasoningDefault
         self.contextBreakdown = contextBreakdown
         self.sessionSpendMicro = sessionSpendMicro
-        self.sessionCachedInputLabel = sessionCachedInputLabel
-        self.isRouterBilledSession = isRouterBilledSession
         self.workspacePoolLabel = workspacePoolLabel
         self.workspacePoolId = workspacePoolId
         self._imageComposerSettings = imageComposerSettings
@@ -275,7 +260,6 @@ struct FloatingInputCard: View {
         self._queuedSend = queuedSend
         self.onSendNow = onSendNow
         self.onCancelQueued = onCancelQueued
-        self.onAddCredits = onAddCredits
         self.isModelPinned = isModelPinned
         self.pinnedModelLabel = pinnedModelLabel
         self.remoteConnectionPending = remoteConnectionPending
@@ -301,21 +285,13 @@ struct FloatingInputCard: View {
     @State private var harnessConfigRevision = 0
     @ObservedObject private var recentFolders = RecentFoldersStore.shared
     // Deliberately NOT `@ObservedObject`: sandbox provisioning publishes
-    // per-progress-tick during runtime downloads and the clipboard service
-    // publishes on every copy, and an observing card re-ran its whole body
-    // each time. Every body-position read of these two lives inside the
-    // selector-row block, which `ChipObservationScope` wraps with its own
-    // observation — the closure re-reads this live singleton state when the
-    // scope re-renders. Everything else here calls them imperatively.
+    // per-progress-tick during runtime downloads. Clipboard monitoring
+    // publishes on every copy, so the selector row and contextual Paste button
+    // each own a narrow observation scope. Neither update re-runs the whole
+    // card body.
     private let sandboxState = SandboxManager.State.shared
     private let clipboardService = ClipboardService.shared
     @ObservedObject private var appConfig = AppConfiguration.shared
-    /// Drives the composer credits chip (balance + low-balance tinting) and the
-    /// wallet panel's recent-activity list.
-    @ObservedObject private var accountService = OsaurusRouterAccountService.shared
-    /// Master-switch mirror for the Osaurus Router; the credits chip shows in
-    /// every session while the router is usable (switch on + identity present).
-    @ObservedObject private var remoteProviders = RemoteProviderManager.shared
     // Frontmost-app + Accessibility observation for the read-only
     // screen-context row lives inside `ScreenContextIndicator`, and the
     // warm-up progress observation lives inside `ModelWarmupHelp` — both
@@ -457,9 +433,12 @@ struct FloatingInputCard: View {
     @StateObject private var textViewFocusController = TextViewFocusController()
     @Environment(\.theme) private var theme
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.accessibilityReduceTransparency) private var accessibilityReduceTransparency
     @State private var isDragOver = false
     @State private var showModelPicker = false
     @State private var modelPickerCardSize = CGSize(width: 532, height: 280)
+    @FocusState private var modelSelectorIsFocused: Bool
     @State private var showCloudModelBrowser = false
     @ObservedObject private var chatModelFavorites = FavoriteModelsStore.shared
     @State private var showImageSizePicker = false
@@ -471,8 +450,8 @@ struct FloatingInputCard: View {
     /// `ViewThatFits` rebuilt three candidate clusters every frame instead.
     @State private var chipRegionWidth: CGFloat = 0
     /// Full width of the selector row. Drives `metaCompact` so the right-edge
-    /// meta cluster (credits CTA + token readout) also sheds its non-essential
-    /// bits when the window is tiled narrow — not just when the sidebar is open.
+    /// workspace-pool balance and token readout shed non-essential bits when
+    /// the window is tiled narrow — not just when the sidebar is open.
     @State private var selectorRowWidth: CGFloat = 0
     // Cache picker items to prevent popover refresh during streaming
     @State private var cachedPickerItems: [ModelPickerItem] = []
@@ -745,47 +724,17 @@ struct FloatingInputCard: View {
         return Date().timeIntervalSince(lastSpeechTime)
     }
 
-    /// Whether the model / sandbox / clipboard / folder selector row has
-    /// anything to show. The screen-context indicator now lives on its own
-    /// row above this one, so it is no longer part of this gate.
-    ///
-    /// In a Mode 2 remote-agent run the context-budget chip is hidden, so the
-    /// pinned-model chip (`isModelPinned`) is what keeps the row visible.
+    /// Whether the upper configuration/status row has anything to show. The
+    /// model selector now stays inside the composer action area.
     private var showSelectorRow: Bool {
-        // Hide the whole selector row (pinned model chip + balance) while a
-        // remote agent is still connecting — the chat isn't usable yet — then
-        // ease it back in on connect with the resolved pinned-model chip.
+        // Hide upper controls while a remote agent is connecting or the
+        // composer is locked. The bottom action area applies the same gate to
+        // its model selector.
         guard !remoteConnectionPending, composerLock == nil else { return false }
-        return pickerItems.count > 1
-            || isModelPinned
-            || (contextBudget.displayTokens > 0 && !isRemoteAgentRun)
-            || isSandboxAvailable
-            || isDefaultConfigAgent
-            || (appConfig.chatConfig.enableClipboardMonitoring && clipboardService.hasNewContent)
-            || showCreditsChip
+        return autoSpeakAssistant
+            || (!isRemoteAgentRun && folderState.hasActiveFolder)
             || workspacePoolLabel != nil
-    }
-
-    /// Whether the credits chip (and its wallet panel) is available at all:
-    /// the router master switch is on, a signing identity exists, and the
-    /// device is online — the balance is spent on cloud services only, so an
-    /// offline composer shows no wallet at all. This gate (without the fetched
-    /// balance below) also keys the balance-refresh task in `body`, so the
-    /// first fetch can run while the chip is still hidden.
-    private var creditsChipAvailable: Bool {
-        remoteProviders.isOsaurusRouterEnabled
-            && !remoteProviders.isOffline
-            && OsaurusIdentity.existsCached()
-    }
-
-    /// Visibility gate for the credits chip. On top of availability, a balance
-    /// must have actually been fetched: with no server-confirmed balance
-    /// (offline at fetch time, router outage, auth failure) the chip's $0 /
-    /// "Add credits" states would be lies, so it stays hidden entirely. Shown
-    /// in every session (not just router-billed ones) because credits are the
-    /// account-level wallet other routed services will draw from too.
-    private var showCreditsChip: Bool {
-        creditsChipAvailable && accountService.balance != nil
+            || (isMediaComposerActive && !isHarnessAgent)
     }
 
     private var mainContent: some View {
@@ -800,11 +749,9 @@ struct FloatingInputCard: View {
             // context-token count, rendered as quiet muted text (not a chip)
             // so it reads as passive status rather than a control.
             if !showVoiceOverlay {
-                // The scope owns the sandbox/clipboard observation, so
-                // provisioning progress ticks and clipboard arrivals re-render
-                // only this row (including its visibility gate) — never the
-                // whole card body. The closure re-reads the live singleton
-                // state on every scope render.
+                // The scope owns sandbox observation so provisioning progress
+                // re-renders only this row. Clipboard arrivals are observed by
+                // the contextual Paste button inside the composer.
                 ChipObservationScope(textModel: composerText) {
                     if screenContextMayShow || showSelectorRow {
                         VStack(alignment: .trailing, spacing: 7) {
@@ -862,8 +809,8 @@ struct FloatingInputCard: View {
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: showVoiceOverlay)
-        // Smoothly collapse/reveal the selector row (model chip + balance) as
-        // the remote-agent connection resolves, so the composer doesn't snap.
+        // Smoothly reveal upper controls and the composer model selector when
+        // a remote-agent connection resolves.
         .animation(theme.springAnimation(), value: remoteConnectionPending)
         .animation(theme.springAnimation(), value: composerLock == nil)
     }
@@ -911,20 +858,6 @@ struct FloatingInputCard: View {
     var body: some View {
         let _ = ChatPerfTrace.shared.count("body.FloatingInputCard")
         mainContent
-            // Refresh the router balance whenever the wallet becomes available
-            // (router on + identity + online). Keyed on availability rather
-            // than chip visibility because the chip stays hidden until a
-            // balance has been fetched — this task is what performs that
-            // first fetch, and it re-fires on the connectivity-recovery edge.
-            // Passive chrome: a balance fetched in the last five minutes is
-            // kept (the billed-summary frames keep it current between
-            // fetches), and every composer mounting at once shares one
-            // request.
-            .task(id: creditsChipAvailable) {
-                if creditsChipAvailable {
-                    await accountService.refreshBalance(ifOlderThan: 300)
-                }
-            }
             // Float the configuration-context error ABOVE the card as an
             // overlay so it never reflows the input/selector layout when it
             // appears or clears. Anchored to the card's top edge and shifted
@@ -2719,10 +2652,6 @@ extension FloatingInputCard {
 
     private var selectorRow: some View {
         HStack(spacing: 6) {
-            if !pickerItems.isEmpty || isModelPinned || isHarnessAgent || !pickerHarnessRuntimes.isEmpty {
-                modelSelectorChip
-            }
-
             // Image-generation models have no thinking, sandbox, folder or
             // token-budget semantics — those chips would all be inert. Swap
             // the whole row for the image config controls instead so they sit
@@ -2753,7 +2682,7 @@ extension FloatingInputCard {
                 // keep their text regardless; every
                 // collapsed chip still names itself on hover via help(). The
                 // ScrollView is the no-wrap safety net: it fills the space
-                // between the model chip and the meta cluster (so the meta
+                // between the toggle controls and the meta cluster (so the meta
                 // cluster stays right-aligned, just like a Spacer would), and
                 // guarantees the labels never wrap character-by-character even
                 // at the minimum window width. We measure this region rather
@@ -2770,7 +2699,7 @@ extension FloatingInputCard {
                     chipRegionWidth = width
                 }
 
-                // Right-aligned "meta" cluster: balance + token usage.
+                // Right-aligned meta cluster for workspace-pool spend.
                 metaCluster
             }
         }
@@ -2781,20 +2710,15 @@ extension FloatingInputCard {
         }
     }
 
-    /// Whether the right-edge meta cluster should shed its non-essential bits
-    /// (the credits icon, the "tokens" caption). True when the caller asked for
-    /// compact (sidebar open) OR the row itself is narrow — the latter is what
-    /// was missing: tiling the window narrow with the sidebar closed left the
-    /// meta cluster at full width and crowded the chips off the row.
+    /// Whether the right-edge workspace-pool chip should shed its non-essential
+    /// labels. True when the caller asked for compact (panel open) OR the row
+    /// itself is narrow, which keeps it from crowding the toggle chips.
     private var metaCompact: Bool {
         isCompact || (selectorRowWidth > 0 && selectorRowWidth < 620)
     }
 
-    /// A tighter tier for genuinely tiny rows (e.g. minimum window width *with*
-    /// the sidebar open, which leaves the chat pane only ~260pt). Here the meta
-    /// cluster gives up its lowest-priority pieces so the toggle chips still fit
-    /// without being clipped mid-icon: the token readout is dropped and the
-    /// credits CTA shrinks to its glyph (hover/tap still opens the wallet).
+    /// A tighter tier for genuinely tiny rows. The workspace-pool chip keeps
+    /// only its identifying glyph so the toggle chips are not clipped.
     private var metaUltraCompact: Bool {
         selectorRowWidth > 0 && selectorRowWidth < 430
     }
@@ -2810,24 +2734,16 @@ extension FloatingInputCard {
         return chipRegionWidth < CGFloat(visibleToggleChipCount) * perLabeledChip
     }
 
-    /// Count of toggle chips currently in the cluster, mirroring the visibility
-    /// conditions in `toggleChipCluster`. Drives the `chipsCompact` width
-    /// budget so the collapse point scales with how many chips are actually on
-    /// screen (a remote-agent run, for instance, hides most of them).
+    /// Count of toggle chips currently in the cluster, mirroring the visible
+    /// auto-speak and folder controls in `toggleChipCluster`.
     private var visibleToggleChipCount: Int {
         var count = 0
         if autoSpeakAssistant { count += 1 }
-        // Configuration chip, or the folder chip once a folder is active.
-        if !isRemoteAgentRun, isDefaultConfigAgent || folderState.hasActiveFolder { count += 1 }
-        if AppConfiguration.shared.chatConfig.enableClipboardMonitoring
-            && clipboardService.hasNewContent
-        {
-            count += 1
-        }
+        if !isRemoteAgentRun && folderState.hasActiveFolder { count += 1 }
         return count
     }
 
-    /// The interactive toggle chips (auto-speak, sandbox, folder, clipboard)
+    /// The interactive upper-row controls (auto-speak and active folder)
     /// as one horizontal group. Thinking is controlled from the model picker
     /// `Model Options` section and reflected as the brain glyph on the model
     /// chip, so changing reasoning mode always goes through the model-scoped
@@ -2842,37 +2758,20 @@ extension FloatingInputCard {
                 autoSpeakToggleChip(compact: compact)
             }
 
-            // Folder selection lives in the + attach menu now, so the chip
-            // only appears once a folder is active (it still carries the
-            // change/refresh/clear affordances). The Default (configuration)
-            // agent keeps its quiet indicator. Hidden in Mode 2.
-            if !isRemoteAgentRun {
-                if folderState.hasActiveFolder {
-                    folderContextChip(compact: compact)
-                } else if isDefaultConfigAgent {
-                    configurationOnlyChip(compact: compact)
-                }
-            }
-
-            // Clipboard / paste chip — last in the left cluster.
-            if AppConfiguration.shared.chatConfig.enableClipboardMonitoring && clipboardService.hasNewContent {
-                clipboardToggleChip(compact: compact)
+            // Folder selection lives in the + attach menu; the chip remains
+            // when a folder is active so its change/refresh/clear actions stay
+            // available. Hidden in Mode 2.
+            if !isRemoteAgentRun && folderState.hasActiveFolder {
+                folderContextChip(compact: compact)
             }
         }
     }
 
-    /// Passive status group for the right edge of the selector row: the Osaurus
-    /// Router balance and the context/token indicator, joined by a hairline only
-    /// when both are present. Rendered as muted text (the balance chip adds its
-    /// own pill only in the low/empty attention states) so it never competes
-    /// with the interactive chips on the left.
+    /// Passive status group for the right edge of the selector row. Workspace
+    /// pool spend remains here; the account-level Credits indicator lives in
+    /// the permanent navigation rail.
     @ViewBuilder
     private var metaCluster: some View {
-        // Hide the balance/credits chip while a remote agent is connecting —
-        // it's not actionable yet and competes with the connect affordance.
-        // A remote agent's run (workspace or directly shared) never draws
-        // from this Mac's wallet, so the personal balance is noise there.
-        let showCredits = showCreditsChip && !remoteConnectionPending && !isRemoteAgentRun
         // Pool-billed chat — a teammate's agent (billed by its host, relayed
         // live) or one of this Mac's own shared agents with "Bill the
         // workspace pool" on: show that spend explicitly rather than the
@@ -2884,15 +2783,6 @@ extension FloatingInputCard {
                 spendMicro: sessionSpendMicro,
                 metaCompact: metaCompact,
                 metaUltraCompact: metaUltraCompact
-            )
-        } else if showCredits {
-            FloatingCreditsChip(
-                isRouterBilledSession: isRouterBilledSession,
-                sessionSpendMicro: sessionSpendMicro,
-                sessionCachedInputLabel: sessionCachedInputLabel,
-                metaCompact: metaCompact,
-                metaUltraCompact: metaUltraCompact,
-                onAddCredits: onAddCredits
             )
         }
     }
@@ -3070,31 +2960,46 @@ extension FloatingInputCard {
         }
     }
 
-    /// Chip label when the agent runs on an external harness: the runtime,
-    /// plus the Claude Code model it launches with.
+    private var shouldShowComposerModelSelector: Bool {
+        guard !remoteConnectionPending, composerLock == nil else { return false }
+        return !pickerItems.isEmpty
+            || selectedModel != nil
+            || isModelPinned
+            || isHarnessAgent
+            || !pickerHarnessRuntimes.isEmpty
+    }
+
+    private var modelSelectorDisplayName: String {
+        if isModelPinned {
+            return pinnedModelLabel ?? selectedPickerItem?.displayName ?? selectedModel ?? L("Default")
+        }
+        if isHarnessAgent {
+            return harnessSelectorDisplayName
+        }
+        return selectedPickerItem?.displayName ?? selectedModel ?? L("Select Model")
+    }
+
+    /// Full runtime/model identity when the agent runs on an external harness.
     private var harnessChipLabel: some View {
         let missing = harnessRuntime == nil
-        return HStack(spacing: 6) {
-            Image(systemName: missing ? "exclamationmark.triangle.fill" : "terminal.fill")
-                .font(theme.font(size: CGFloat(theme.captionSize) - 2))
-                .foregroundColor(missing ? theme.warningColor : theme.tertiaryText)
-            Text(harnessRuntime?.displayName ?? L("Runtime missing"))
-                .font(theme.font(size: CGFloat(theme.captionSize), weight: .medium))
-                .foregroundColor(missing ? theme.warningColor : theme.secondaryText)
-                .lineLimit(1)
-            if let model = harnessClaudeModelLabel {
-                Text(verbatim: "· \(model)")
-                    .font(theme.font(size: CGFloat(theme.captionSize) - 1, weight: .regular))
-                    .foregroundColor(theme.tertiaryText)
-                    .lineLimit(1)
-            }
-        }
+        return Text(harnessSelectorDisplayName)
+            .font(theme.font(size: CGFloat(theme.captionSize), weight: .medium))
+            .foregroundColor(missing ? theme.warningColor : theme.secondaryText)
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
+            .multilineTextAlignment(.trailing)
     }
 
     private var harnessClaudeModelLabel: String? {
         guard let runtime = harnessRuntime, runtime.kind == .claudeCode else { return nil }
         let model = agentManager.effectiveClaudeCodeConfig(for: effectiveAgentId).resolvedModel
         return ClaudeCodeModel(rawValue: model) != nil ? model.capitalized : model
+    }
+
+    private var harnessSelectorDisplayName: String {
+        let runtimeName = harnessRuntime?.displayName ?? L("Runtime missing")
+        guard let harnessClaudeModelLabel else { return runtimeName }
+        return "\(runtimeName) · \(harnessClaudeModelLabel)"
     }
 
     private var harnessChipHelp: String? {
@@ -3142,24 +3047,26 @@ extension FloatingInputCard {
         harnessConfigRevision &+= 1
     }
 
-    /// Non-interactive model label for Mode 2 (remote agent run). The model is
-    /// pinned to the remote agent's own model — no chevron, no popover, just the
-    /// model name and a lock glyph. Styled to match the resting `SelectorChip`.
+    /// Non-interactive model label for Mode 2 (remote agent run). The full
+    /// pinned name stays visible beside the lock; there is no picker chevron.
     private var pinnedModelChip: some View {
         HStack(spacing: 6) {
             Image(systemName: "lock.fill")
                 .font(theme.font(size: CGFloat(theme.captionSize) - 2))
                 .foregroundColor(theme.tertiaryText)
-            Text(pinnedModelLabel ?? selectedPickerItem?.displayName ?? L("Default"))
+                .accessibilityHidden(true)
+            Text(modelSelectorDisplayName)
                 .font(theme.font(size: CGFloat(theme.captionSize), weight: .medium))
                 .foregroundColor(theme.secondaryText)
-                .lineLimit(1)
+                .lineLimit(nil)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.trailing)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(Capsule().fill(theme.secondaryBackground.opacity(0.8)))
-        .overlay(Capsule().strokeBorder(theme.primaryBorder.opacity(0.12), lineWidth: 1))
-        .clipShape(Capsule())
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(verbatim: modelSelectorDisplayName))
         .localizedHelp(
             "This chat runs on the remote agent's own model — chosen by the agent's owner and not changeable here."
         )
@@ -3177,12 +3084,14 @@ extension FloatingInputCard {
         showModelPicker = true
     }
 
-    /// Keep the pill visually simple while retaining the removed badges'
-    /// thinking and input-capability information for hover and VoiceOver.
+    /// Keep the plain selector label focused on model identity while retaining
+    /// thinking and input-capability details for hover and VoiceOver.
     private var modelSelectorDetails: String {
         guard !isHarnessAgent else { return "" }
         var details: [String] = []
-        if let thinkingOn = inlineThinkingEnabled {
+        if let suffix = inlineReasoningSuffix {
+            details.append(suffix)
+        } else if let thinkingOn = inlineThinkingEnabled {
             if inlineThinkingUsesNativeDefault {
                 details.append([L("Thinking"), L("Default")].joined(separator: ": "))
             } else {
@@ -3199,82 +3108,115 @@ extension FloatingInputCard {
     }
 
     private var interactiveModelSelectorChip: some View {
-        SelectorChip(isActive: showModelPicker) {
-            if showModelPicker { dismissModelPicker() }
-            else { openModelPicker() }
-        } content: {
-            if isHarnessAgent {
-                harnessChipLabel
-            } else {
-                builtInModelChipLabel
-            }
-        }
-        .accessibilityValue(Text(verbatim: modelSelectorDetails))
-        // Chip-wide hover target: the 6px dot alone is too small to hover.
-        .modifier(
-            ModelWarmupHelp(
-                isDeprecated: isSelectedModelDeprecated,
-                isLocalModelRun: isSelectedModelLocal && !isRemoteAgentRun,
-                selectedModel: selectedModel,
-                modelDetails: modelSelectorDetails,
-                harnessHelp: harnessChipHelp,
-                warmupController: warmupController
-            )
-        )
-        .anchoredCard(isPresented: $showModelPicker, size: modelPickerCardSize, accessibilityLabel: L("Model picker")) {
-            ChatModelPickerCard(
-                providers: chatPickerProviders,
-                selectedModel: $selectedModel,
-                optionsControl: modelPickerOptionsControl,
-                selectedHarnessID: selectedHarnessPickerID,
-                runtimeSwitchLocked: isStreaming,
-                onSelectHarness: { selectHarness($0) },
-                onExploreLocal: {
-                    dismissModelPicker()
-                    AppDelegate.shared?.showManagementWindow(initialTab: .models)
-                },
-                onExploreCloud: {
-                    dismissModelPicker()
-                    DispatchQueue.main.async { showCloudModelBrowser = true }
-                },
-                onSizeChange: { modelPickerCardSize = $0 }
-            )
-        }
-        .sheet(isPresented: $showCloudModelBrowser) {
-            CloudModelBrowserDialog(
-                options: cloudPickerItems,
-                selectedModel: $selectedModel,
-                onDismiss: { showCloudModelBrowser = false },
-                onManageCloud: {
-                    showCloudModelBrowser = false
-                    AppDelegate.shared?.showManagementWindow(initialTab: .credits)
+        HoverScope(animation: .easeOut(duration: 0.12)) { isHovered in
+            Button {
+                if showModelPicker { dismissModelPicker() }
+                else { openModelPicker() }
+            } label: {
+                HStack(spacing: 5) {
+                    if isHarnessAgent {
+                        harnessChipLabel
+                    } else {
+                        builtInModelChipLabel
+                    }
+
+                    Image(systemName: "chevron.down")
+                        .font(theme.font(size: CGFloat(theme.captionSize) - 2, weight: .semibold))
+                        .foregroundColor(theme.tertiaryText)
+                        .fixedSize()
                 }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(theme.secondaryBackground.opacity(showModelPicker ? 0.5 : 0.24))
+                        .opacity(isHovered || showModelPicker ? 1 : 0)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(
+                            composerFocusColor.opacity(modelSelectorIsFocused ? 1 : 0),
+                            lineWidth: colorSchemeContrast == .increased ? 2 : 1
+                        )
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .focused($modelSelectorIsFocused)
+            .accessibilityLabel(Text(verbatim: modelSelectorDisplayName))
+            .accessibilityValue(Text(verbatim: modelSelectorDetails))
+            .modifier(
+                ModelWarmupHelp(
+                    isDeprecated: isSelectedModelDeprecated,
+                    isLocalModelRun: isSelectedModelLocal && !isRemoteAgentRun,
+                    selectedModel: selectedModel,
+                    modelDetails: modelSelectorDetails,
+                    harnessHelp: harnessChipHelp,
+                    warmupController: warmupController
+                )
             )
-            .environment(\.theme, theme)
-        }
-        .onChange(of: showModelPicker) { _, isShowing in
-            if isShowing {
-                // Snapshot options when popover opens to prevent refresh during streaming
-                cachedPickerItems = pickerItems
-                // Residency and the saved MTP mode both change outside this
-                // view; a stale set would hide the depth row on a capable
-                // model, which reads as "this model has no MTP".
-                refreshNativeMTPState()
-                Task {
-                    await RemoteProviderManager.shared.refreshConnectedProviders()
-                    await ModelPickerItemCache.shared.buildModelPickerItems()
-                    // Refresh external availability through the shared catalog;
-                    // retained registrations alone do not make a model ready.
-                    _ = await Task.detached(priority: .utility) {
-                        ExternalModelLocator.pruneMissing()
-                    }.value
+            .anchoredCard(
+                isPresented: $showModelPicker,
+                size: modelPickerCardSize,
+                alignment: .trailing,
+                accessibilityLabel: L("Model picker")
+            ) {
+                ChatModelPickerCard(
+                    providers: chatPickerProviders,
+                    selectedModel: $selectedModel,
+                    optionsControl: modelPickerOptionsControl,
+                    selectedHarnessID: selectedHarnessPickerID,
+                    runtimeSwitchLocked: isStreaming,
+                    onSelectHarness: { selectHarness($0) },
+                    onExploreLocal: {
+                        dismissModelPicker()
+                        AppDelegate.shared?.showManagementWindow(initialTab: .models)
+                    },
+                    onExploreCloud: {
+                        dismissModelPicker()
+                        DispatchQueue.main.async { showCloudModelBrowser = true }
+                    },
+                    onSizeChange: { modelPickerCardSize = $0 }
+                )
+            }
+            .sheet(isPresented: $showCloudModelBrowser) {
+                CloudModelBrowserDialog(
+                    options: cloudPickerItems,
+                    selectedModel: $selectedModel,
+                    onDismiss: { showCloudModelBrowser = false },
+                    onManageCloud: {
+                        showCloudModelBrowser = false
+                        AppDelegate.shared?.showManagementWindow(initialTab: .credits)
+                    }
+                )
+                .environment(\.theme, theme)
+            }
+            .onChange(of: showModelPicker) { _, isShowing in
+                if isShowing {
+                    // Snapshot options when picker opens to prevent refresh during streaming.
+                    cachedPickerItems = pickerItems
+                    // Residency and the saved MTP mode both change outside this
+                    // view; a stale set would hide the depth row on a capable
+                    // model, which reads as "this model has no MTP".
+                    refreshNativeMTPState()
+                    Task {
+                        await RemoteProviderManager.shared.refreshConnectedProviders()
+                        await ModelPickerItemCache.shared.buildModelPickerItems()
+                        // Refresh external availability through the shared catalog;
+                        // retained registrations alone do not make a model ready.
+                        _ = await Task.detached(priority: .utility) {
+                            ExternalModelLocator.pruneMissing()
+                        }.value
+                    }
                 }
             }
-        }
-        .onChange(of: pickerItems) { _, newItems in
-            // mirror upstream changes while open so picker triggered refreshes are visible
-            if showModelPicker {
-                cachedPickerItems = newItems
+            .onChange(of: pickerItems) { _, newItems in
+                // Mirror upstream changes while open so picker-triggered refreshes are visible.
+                if showModelPicker {
+                    cachedPickerItems = newItems
+                }
             }
         }
     }
@@ -3285,53 +3227,21 @@ extension FloatingInputCard {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(theme.font(size: CGFloat(theme.captionSize) - 2))
                     .foregroundColor(.orange)
+                    .accessibilityHidden(true)
                     .localizedHelp("This model is outdated. Click to switch to a newer version.")
             } else {
-                // Tooltip comes from the chip-wide `.help` below — the
-                // 6px dot is too small to be its own hover target.
                 Circle()
                     .fill(modelWarmupDotColor)
                     .frame(width: 6, height: 6)
+                    .accessibilityHidden(true)
             }
 
-            // Model name and reasoning text, without suffix icons.
-            if let option = selectedPickerItem {
-                HStack(spacing: 4) {
-                    Text(option.displayName)
-                        .font(theme.font(size: CGFloat(theme.captionSize), weight: .medium))
-                        .foregroundColor(isSelectedModelDeprecated ? .orange : theme.secondaryText)
-                        .lineLimit(1)
-
-                    // Effective reasoning effort/mode for models with a
-                    // segmented reasoning option (Codex catalog, official
-                    // OpenAI GPT-5.6, DSV4/Mistral/Hy3 profiles),
-                    // matching ChatGPT's "model · effort" hierarchy.
-                    // Shows the catalog/profile default when no explicit
-                    // choice exists.
-                    if let suffix = inlineReasoningSuffix {
-                        Text(verbatim: "· \(suffix)")
-                            .font(theme.font(size: CGFloat(theme.captionSize) - 1, weight: .regular))
-                            .foregroundColor(theme.tertiaryText)
-                            .lineLimit(1)
-                    }
-
-                    if !isCompact, let params = option.parameterCount {
-                        Text(params)
-                            .font(theme.font(size: CGFloat(theme.captionSize) - 3, weight: .medium))
-                            .foregroundColor(.blue.opacity(0.8))
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(
-                                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                                    .fill(Color.blue.opacity(0.12))
-                            )
-                    }
-                }
-            } else {
-                Text("Select Model", bundle: .module)
-                    .font(theme.font(size: CGFloat(theme.captionSize), weight: .medium))
-                    .foregroundColor(theme.secondaryText)
-            }
+            Text(modelSelectorDisplayName)
+                .font(theme.font(size: CGFloat(theme.captionSize), weight: .medium))
+                .foregroundColor(isSelectedModelDeprecated ? .orange : theme.secondaryText)
+                .lineLimit(nil)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.trailing)
         }
     }
 
@@ -3536,7 +3446,7 @@ extension FloatingInputCard {
             HStack(spacing: 5) {
                 Image(systemName: autoSpeakAssistant ? "checkmark.square.fill" : "square")
                     .font(theme.font(size: CGFloat(theme.captionSize) - 1, weight: .semibold))
-                    .foregroundColor(autoSpeakAssistant ? theme.accentColor : theme.tertiaryText)
+                    .foregroundColor(autoSpeakAssistant ? composerBlueColor : theme.tertiaryText)
                     .contentTransition(.symbolEffect(.replace))
 
                 if !compact {
@@ -3557,11 +3467,8 @@ extension FloatingInputCard {
         agentId ?? Agent.defaultId
     }
 
-    /// The built-in Default ("Osaurus") agent is the Orchestrator: it
-    /// configures Osaurus and delegates work. It never uses the sandbox, so
-    /// the sandbox chip is hidden; it shows a quiet "Orchestrator" indicator
-    /// until a working folder is attached (read-only for itself, inherited
-    /// by folder-less subagents).
+    /// The built-in Default ("Osaurus") agent is the Orchestrator. This
+    /// predicate preserves its configuration-tool and working-folder rules.
     private var isDefaultConfigAgent: Bool {
         effectiveAgentId == Agent.defaultId
     }
@@ -4069,133 +3976,13 @@ extension FloatingInputCard {
 
     // MARK: - Clipboard Chip
 
-    /// SF Symbol representing the kind of content currently on the clipboard.
-    /// The chip pairs this icon with a leading "Paste" label and the source app.
-    private var clipboardChipIcon: String {
-        guard let content = clipboardService.currentContent else {
-            return "paperclip"
-        }
-        switch content {
-        case .text:
-            return "text.quote"
-        case .image:
-            return "photo"
-        case .file(let url):
-            let kind = Attachment.Kind.document(filename: url.lastPathComponent, content: "", fileSize: 0)
-            return Attachment(kind: kind).fileIcon
-        }
-    }
-
-    @ViewBuilder
-    private func clipboardChipLabel(compact: Bool) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: clipboardChipIcon)
-                .font(.system(size: CGFloat(theme.captionSize) - 2, weight: .medium))
-                .foregroundColor(theme.accentColor)
-
-            // Collapsed, the chip is just its icon (hover names it) so it can't
-            // be clipped mid-word in the narrow scroll region. Expanded, lead
-            // with the action word so it reads as "Paste" like its row-mates
-            // ("Sandbox", "Folder"), with the source app as a quiet suffix.
-            if !compact {
-                Text("Paste", bundle: .module)
-                    .font(theme.font(size: CGFloat(theme.captionSize), weight: .bold))
-                    .foregroundColor(theme.accentColor)
-                    .lineLimit(1)
-                    .fixedSize()
-
-                if let source = clipboardService.lastSourceApp {
-                    Text(source)
-                        .font(theme.font(size: CGFloat(theme.captionSize), weight: .medium))
-                        .foregroundColor(theme.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                Image(systemName: "chevron.right")
-                    .font(theme.font(size: CGFloat(theme.captionSize) - 4, weight: .bold))
-                    .foregroundColor(theme.tertiaryText.opacity(0.7))
-                    .padding(.leading, 2)
+    private func pasteClipboardTextToInput(_ text: String) {
+        if text.utf8.count >= Self.pastedContentThreshold {
+            withAnimation(theme.springAnimation()) {
+                pendingAttachments.append(.pastedContent(text))
             }
-        }
-    }
-
-    private func clipboardToggleChip(compact: Bool) -> some View {
-        // HoverScope owns the hover flag and ClipboardPulseSweep owns the
-        // arrival-pulse animation state, so neither re-renders the card body.
-        HoverScope { isClipboardHovered in
-            Button(action: attachClipboardSnippet) {
-                clipboardChipLabel(compact: compact)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(
-                        Capsule()
-                            .fill(theme.secondaryBackground.opacity(isClipboardHovered ? 0.95 : 0.8))
-                    )
-                    .clipShape(Capsule())
-                    .overlay(
-                        // main static border
-                        Capsule()
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        theme.glassEdgeLight.opacity(isClipboardHovered ? 0.25 : 0.15),
-                                        theme.accentColor.opacity(isClipboardHovered ? 0.6 : 0.15),
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 1
-                            )
-                    )
-                    .modifier(
-                        ClipboardPulseSweep(
-                            hovered: isClipboardHovered,
-                            trigger: clipboardService.hasNewContent
-                        )
-                    )
-            }
-            .buttonStyle(.plain)
-            .pointingHandCursor()
-            .help(Text(localized: "Attach snippet from \(clipboardService.lastSourceApp ?? "clipboard")"))
-            .contextMenu {
-                Button {
-                    clipboardService.markAsRead()
-                } label: {
-                    Text("Dismiss", bundle: .module)
-                }
-                Divider()
-                if let content = clipboardService.currentContent {
-                    switch content {
-                    case .text(let text):
-                        Button {
-                            if text.utf8.count >= Self.pastedContentThreshold {
-                                withAnimation(theme.springAnimation()) {
-                                    pendingAttachments.append(.pastedContent(text))
-                                }
-                            } else {
-                                localText += text
-                            }
-                            clipboardService.markAsRead()
-                        } label: {
-                            Text("Paste to Input", bundle: .module)
-                        }
-                    case .file:
-                        Button {
-                            attachClipboardSnippet()
-                        } label: {
-                            Text("Attach File", bundle: .module)
-                        }
-                    case .image:
-                        Button {
-                            attachClipboardSnippet()
-                        } label: {
-                            Text("Attach Image", bundle: .module)
-                        }
-                    }
-                }
-            }
-            .transition(.scale(scale: 0.8).combined(with: .opacity))
+        } else {
+            localText += text
         }
     }
 
@@ -4273,52 +4060,6 @@ extension FloatingInputCard {
                 }
             }
         }
-    }
-
-    // MARK: - Orchestrator Indicator Chip
-
-    /// Quiet pill shown for the built-in Orchestrator ("Osaurus") agent in
-    /// place of the sandbox/folder chips. It signals that this agent's job
-    /// is to configure Osaurus and delegate work — it doesn't execute code
-    /// in a sandbox or work against a host folder — so those controls are
-    /// absent by design rather than missing. Clicking it opens Settings →
-    /// Orchestrator, where its identity and delegation helpers live.
-    private func configurationOnlyChip(compact: Bool) -> some View {
-        Button {
-            AppDelegate.shared?.showManagementWindow(initialTab: .orchestrator)
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "point.3.connected.trianglepath.dotted")
-                    .font(theme.font(size: CGFloat(theme.captionSize) - 2, weight: .semibold))
-                    .foregroundColor(theme.accentColor)
-
-                if !compact {
-                    Text("Orchestrator", bundle: .module)
-                        .font(theme.font(size: CGFloat(theme.captionSize), weight: .medium))
-                        .foregroundColor(theme.secondaryText)
-                        .lineLimit(1)
-                        .fixedSize()
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(
-                Capsule()
-                    .fill(theme.accentColor.opacity(0.08))
-            )
-            .overlay(
-                Capsule()
-                    .strokeBorder(theme.accentColor.opacity(0.25), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .help(
-            Text(
-                "The Orchestrator configures Osaurus and delegates work to your agents. It doesn't use the sandbox or a working folder. Click to open its settings.",
-                bundle: .module
-            )
-        )
-        .accessibilityLabel(Text("Orchestrator", bundle: .module))
     }
 
     /// Cheap, card-level half of the screen-context gate: opt-in on, empty
@@ -4886,7 +4627,7 @@ extension FloatingInputCard {
         HStack(spacing: 4) {
             Image(systemName: hasFolder ? "folder.fill" : "folder.badge.plus")
                 .font(theme.font(size: CGFloat(theme.captionSize) - 2))
-                .foregroundColor(hasFolder ? theme.accentColor : theme.tertiaryText)
+                .foregroundColor(hasFolder ? composerBlueColor : theme.tertiaryText)
                 .opacity(canEdit ? 1.0 : 0.7)
 
             // The selected folder name is live state, so keep it even when
@@ -4969,7 +4710,11 @@ extension FloatingInputCard {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(
                     effectiveBorderStyle,
-                    lineWidth: isDragOver ? 2 : (inputStyle == .shadow ? 0.75 : (isFocused ? 1.5 : 0.5))
+                    lineWidth: isDragOver
+                        ? 2
+                        : (isFocused && colorSchemeContrast == .increased
+                            ? 2
+                            : (inputStyle == .shadow ? (isFocused ? 1.25 : 0.75) : (isFocused ? 1.5 : 0.5)))
                 )
         )
         .shadow(
@@ -6111,16 +5856,28 @@ extension FloatingInputCard {
     // MARK: - Button Bar
 
     private var buttonBar: some View {
-        HStack(spacing: 8) {
+        ComposerActionBarLayout {
             HStack(spacing: 6) {
                 mediaButton
                 slashCommandButton
+                ContextualClipboardPasteButton(
+                    isMonitoringEnabled: appConfig.chatConfig.enableClipboardMonitoring,
+                    onPaste: attachClipboardSnippet,
+                    onPasteTextToInput: pasteClipboardTextToInput
+                )
             }
 
-            Spacer()
+            ZStack {
+                contextBudgetRing
+            }
+
+            ZStack {
+                if shouldShowComposerModelSelector {
+                    modelSelectorChip
+                }
+            }
 
             HStack(spacing: 8) {
-                contextBudgetRing
                 FloatingVoiceButton(
                     voiceInputEnabled: voiceConfig.voiceInputEnabled,
                     isStreaming: isStreaming,
@@ -6140,14 +5897,12 @@ extension FloatingInputCard {
                     }
                     if queuedSend != nil {
                         sendNowButton
-                    } else {
+                    } else if !isPrivacyReviewSheetVisible && canSend {
                         // No queue-during-review: the user hasn't even
                         // committed the in-flight message yet.
-                        if !isPrivacyReviewSheetVisible {
-                            sendQueueButton
-                        }
+                        sendQueueButton
                     }
-                } else {
+                } else if canSend {
                     sendButton
                 }
             }
@@ -6233,29 +5988,44 @@ extension FloatingInputCard {
 
     // MARK: - Card Styling
 
+    private var composerBlueColor: Color {
+        ComposerPalette.blue(
+            isDark: theme.isDark,
+            increasedContrast: colorSchemeContrast == .increased
+        )
+    }
+
+    private var composerFocusColor: Color {
+        composerBlueColor
+    }
+
     private var cardBackground: some View {
         ZStack {
             // NSVisualEffectView-backed glass behind everything, only when
-            // the prompt card's own glass toggle is on. The fill above is
-            // already semi-transparent so the material shows through.
+            // the prompt card's own glass toggle is on. The fill remains
+            // translucent only when Reduce Transparency is off.
             if theme.glassInputEnabled {
                 ThemedGlassSurface(cornerRadius: 20)
             }
 
             RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(theme.primaryBackground.opacity(theme.isDark ? 0.82 : 0.94))
+                .fill(
+                    theme.primaryBackground.opacity(
+                        accessibilityReduceTransparency ? 1 : (theme.isDark ? 0.82 : 0.94)
+                    )
+                )
 
             // subtle accent gradient at top (enhanced when focused)
             LinearGradient(
                 colors: [
-                    theme.accentColor.opacity(isFocused ? 0.08 : (theme.isDark ? 0.04 : 0.025)),
+                    composerBlueColor.opacity(isFocused ? 0.08 : (theme.isDark ? 0.04 : 0.025)),
                     Color.clear,
                 ],
                 startPoint: .top,
                 endPoint: .center
             )
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .opacity(inputStyle == .gradient ? 1 : 0)
+            .opacity(inputStyle == .gradient && !accessibilityReduceTransparency ? 1 : 0)
         }
     }
 
@@ -6263,9 +6033,12 @@ extension FloatingInputCard {
 
     private var effectiveBorderStyle: AnyShapeStyle {
         if isDragOver {
-            return AnyShapeStyle(theme.accentColor)
+            return AnyShapeStyle(composerBlueColor)
         }
         if inputStyle == .shadow {
+            if isFocused {
+                return AnyShapeStyle(composerFocusColor)
+            }
             return AnyShapeStyle(theme.primaryBorder.opacity(theme.isDark ? 0.8 : 0.7))
         }
         return borderGradient
@@ -6273,17 +6046,7 @@ extension FloatingInputCard {
 
     private var borderGradient: AnyShapeStyle {
         if isFocused {
-            return AnyShapeStyle(
-                LinearGradient(
-                    colors: [
-                        theme.accentColor.opacity(0.5),
-                        theme.accentColor.opacity(0.2),
-                        theme.glassEdgeLight.opacity(0.15),
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
+            return AnyShapeStyle(composerFocusColor)
         } else {
             return AnyShapeStyle(
                 LinearGradient(
@@ -6300,7 +6063,295 @@ extension FloatingInputCard {
 
     private var shadowColor: Color {
         let opacity = isFocused ? (theme.isDark ? 0.18 : 0.14) : 0.07
-        return (theme.isDark ? theme.accentColor : theme.shadowColor).opacity(opacity)
+        return (isFocused ? composerFocusColor : theme.shadowColor).opacity(opacity)
+    }
+}
+
+/// Keeps primary composer actions on one row and moves only the model selector
+/// below them when its complete label cannot fit beside microphone and send.
+private struct ComposerActionBarLayout: Layout {
+    private let itemSpacing: CGFloat = 8
+    private let rowSpacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        guard sizes.count == 4 else {
+            let width = sizes.reduce(0) { $0 + $1.width } + itemSpacing * CGFloat(max(0, sizes.count - 1))
+            let height = sizes.map(\.height).max() ?? 0
+            return CGSize(width: proposal.width ?? width, height: height)
+        }
+
+        let width = proposal.width ?? naturalWidth(for: sizes)
+        let hasContext = sizes[1].width > 0 && sizes[1].height > 0
+        let hasModel = sizes[2].width > 0 && sizes[2].height > 0
+        if fitsSingleRow(sizes, width: width, hasContext: hasContext, hasModel: hasModel) {
+            return CGSize(width: width, height: singleRowHeight(sizes, hasModel: hasModel))
+        }
+
+        let actionHeight = actionRowHeight(sizes)
+        guard hasModel else { return CGSize(width: width, height: actionHeight) }
+        let modelSize = subviews[2].sizeThatFits(ProposedViewSize(width: width, height: nil))
+        return CGSize(width: width, height: actionHeight + rowSpacing + modelSize.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count == 4 else {
+            var x = bounds.minX
+            for subview in subviews {
+                let size = subview.sizeThatFits(.unspecified)
+                subview.place(
+                    at: CGPoint(x: x, y: bounds.minY),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(width: size.width, height: size.height)
+                )
+                x += size.width + itemSpacing
+            }
+            return
+        }
+
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let hasContext = sizes[1].width > 0 && sizes[1].height > 0
+        let hasModel = sizes[2].width > 0 && sizes[2].height > 0
+        let actionHeight = actionRowHeight(sizes)
+
+        if fitsSingleRow(sizes, width: bounds.width, hasContext: hasContext, hasModel: hasModel) {
+            let rowHeight = singleRowHeight(sizes, hasModel: hasModel)
+            let trailingWidth = sizes[3].width
+                + (hasModel ? itemSpacing + sizes[2].width : 0)
+                + (hasContext ? itemSpacing + sizes[1].width : 0)
+            let trailingX = bounds.maxX - trailingWidth
+            let contextX = trailingX
+            let modelX = contextX + (hasContext ? sizes[1].width + itemSpacing : 0)
+            let actionsX = bounds.maxX - sizes[3].width
+
+            place(
+                subviews[0],
+                size: sizes[0],
+                at: CGPoint(x: bounds.minX, y: bounds.minY + (rowHeight - sizes[0].height) / 2)
+            )
+            if hasContext {
+                place(
+                    subviews[1],
+                    size: sizes[1],
+                    at: CGPoint(x: contextX, y: bounds.minY + (rowHeight - sizes[1].height) / 2)
+                )
+            }
+            if hasModel {
+                place(
+                    subviews[2],
+                    size: sizes[2],
+                    at: CGPoint(x: modelX, y: bounds.minY + (rowHeight - sizes[2].height) / 2)
+                )
+            }
+            place(
+                subviews[3],
+                size: sizes[3],
+                at: CGPoint(x: actionsX, y: bounds.minY + (rowHeight - sizes[3].height) / 2)
+            )
+            return
+        }
+
+        let trailingWidth = sizes[3].width + (hasContext ? itemSpacing + sizes[1].width : 0)
+        let trailingX = bounds.maxX - trailingWidth
+        place(subviews[0], size: sizes[0], at: CGPoint(x: bounds.minX, y: bounds.minY))
+        if hasContext {
+            place(subviews[1], size: sizes[1], at: CGPoint(x: trailingX, y: bounds.minY))
+        }
+        place(
+            subviews[3],
+            size: sizes[3],
+            at: CGPoint(x: bounds.maxX - sizes[3].width, y: bounds.minY)
+        )
+
+        if hasModel {
+            let modelSize = subviews[2].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+            subviews[2].place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY + actionHeight + rowSpacing),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(width: bounds.width, height: modelSize.height)
+            )
+        }
+    }
+
+    private func fitsSingleRow(
+        _ sizes: [CGSize],
+        width: CGFloat,
+        hasContext: Bool,
+        hasModel: Bool
+    ) -> Bool {
+        let trailingWidth = sizes[3].width
+            + (hasModel ? itemSpacing + sizes[2].width : 0)
+            + (hasContext ? itemSpacing + sizes[1].width : 0)
+        return sizes[0].width + (trailingWidth > 0 ? itemSpacing : 0) + trailingWidth <= width
+    }
+
+    private func actionRowHeight(_ sizes: [CGSize]) -> CGFloat {
+        max(sizes[0].height, max(sizes[1].height, sizes[3].height))
+    }
+
+    private func singleRowHeight(_ sizes: [CGSize], hasModel: Bool) -> CGFloat {
+        max(actionRowHeight(sizes), hasModel ? sizes[2].height : 0)
+    }
+
+    private func naturalWidth(for sizes: [CGSize]) -> CGFloat {
+        sizes.reduce(0) { $0 + $1.width } + itemSpacing * CGFloat(max(0, sizes.count - 1))
+    }
+
+    private func place(_ subview: LayoutSubview, size: CGSize, at point: CGPoint) {
+        subview.place(
+            at: point,
+            anchor: .topLeading,
+            proposal: ProposedViewSize(width: size.width, height: size.height)
+        )
+    }
+}
+
+private enum ComposerPalette {
+    static func blue(isDark: Bool, increasedContrast: Bool) -> Color {
+        switch (isDark, increasedContrast) {
+        case (true, true): return Color(hex: "A6C0D8")
+        case (true, false): return Color(hex: "7893AD")
+        case (false, true): return Color(hex: "365873")
+        case (false, false): return Color(hex: "496987")
+        }
+    }
+
+    static func sendFill(isDark: Bool, increasedContrast: Bool) -> Color {
+        switch (isDark, increasedContrast) {
+        case (true, true): return Color(hex: "9FBBD3")
+        case (true, false), (false, false): return Color(hex: "496987")
+        case (false, true): return Color(hex: "365873")
+        }
+    }
+}
+
+/// Plain toolbar icon treatment shared by composer actions. Hover feedback is
+/// ephemeral; keyboard focus gets an opaque, theme-aware outline.
+private struct ComposerToolbarButtonAppearance: ViewModifier {
+    let isHovered: Bool
+    let isFocused: Bool
+    let isEmphasized: Bool
+
+    @Environment(\.theme) private var theme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    private var accentBlue: Color {
+        ComposerPalette.blue(
+            isDark: theme.isDark,
+            increasedContrast: colorSchemeContrast == .increased
+        )
+    }
+
+    private var focusColor: Color {
+        accentBlue
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .foregroundColor(
+                isEmphasized || isHovered
+                    ? accentBlue
+                    : (colorSchemeContrast == .increased ? theme.primaryText : theme.secondaryText)
+            )
+            .frame(width: 34, height: 34)
+            .background {
+                if isHovered || isFocused {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(
+                            theme.tertiaryBackground.opacity(
+                                reduceTransparency || colorSchemeContrast == .increased ? 1 : 0.58
+                            )
+                        )
+                }
+            }
+            .overlay {
+                if isFocused {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(
+                            focusColor,
+                            lineWidth: colorSchemeContrast == .increased || reduceTransparency ? 2 : 1.25
+                        )
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+/// Circular treatment reserved for the primary Send and Stop actions.
+private struct ComposerCircularActionAppearance: ViewModifier {
+    enum Kind {
+        case send
+        case stop
+    }
+
+    let kind: Kind
+    let isHovered: Bool
+    let isFocused: Bool
+
+    @Environment(\.theme) private var theme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+
+    private var isSend: Bool {
+        if case .send = kind { return true }
+        return false
+    }
+
+    private var fillColor: Color {
+        if isSend {
+            return ComposerPalette.sendFill(
+                isDark: theme.isDark,
+                increasedContrast: colorSchemeContrast == .increased
+            )
+        }
+        return isHovered ? theme.secondaryBackground : theme.tertiaryBackground
+    }
+
+    private var foregroundColor: Color {
+        if isSend, theme.isDark, colorSchemeContrast == .increased {
+            return theme.primaryBackground
+        }
+        return isSend ? .white : theme.primaryText
+    }
+
+    private var focusColor: Color {
+        if isSend { return theme.primaryText }
+        return ComposerPalette.blue(
+            isDark: theme.isDark,
+            increasedContrast: colorSchemeContrast == .increased
+        )
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .foregroundColor(foregroundColor)
+            .frame(width: 34, height: 34)
+            .background {
+                Circle()
+                    .fill(fillColor)
+                    .overlay {
+                        if isSend && isHovered {
+                            Circle().fill(Color.white.opacity(0.08))
+                        }
+                    }
+            }
+            .overlay {
+                if !isSend {
+                    Circle().strokeBorder(
+                        colorSchemeContrast == .increased ? theme.primaryText : theme.primaryBorder,
+                        lineWidth: colorSchemeContrast == .increased ? 1.5 : 1
+                    )
+                }
+            }
+            .overlay {
+                if isFocused {
+                    Circle().strokeBorder(
+                        focusColor,
+                        lineWidth: colorSchemeContrast == .increased ? 2 : 1.5
+                    )
+                }
+            }
+            .contentShape(Circle())
     }
 }
 
@@ -6746,7 +6797,7 @@ extension NSImage {
 // MARK: - Popover Card Chrome
 
 /// Shared rounded glass card chrome for the composer's hover/selector popovers
-/// (Context Budget, router balance, model options) so they read as one family.
+/// (Context Budget, wallet, model options) so they read as one family.
 /// Defaults match the lightweight hover cards; the model-options panel passes
 /// larger values for its heavier look.
 private struct PopoverCardModifier: ViewModifier {
@@ -7559,15 +7610,15 @@ private struct BudgetDisclosureRow<Label: View>: View {
 
 // MARK: - Wallet Popover
 
-/// The composer wallet panel, presented in the same arrowless, themed card
-/// as the model picker, aligned to the trailing edge of its credits chip.
-/// Opens from the credits chip as a hover preview or a pinned click-through
+/// The Credits wallet panel, presented in the same arrowless, themed card
+/// as the model picker, aligned to the trailing edge of its rail indicator.
+/// Opens from the rail indicator as a hover preview or a pinned click-through
 /// panel: balance hero, per-session router spend, recent account activity
 /// (model requests + ledger transactions), and Add credits / View all actions.
 /// This is the surface agent-initiated credit transactions will land in — new
 /// ledger `entry_type`s render here via `WalletActivityProjector` without UI
 /// rework.
-private struct WalletPopover: View {
+struct WalletPopover: View {
     /// This session's router spend; nil outside router-billed sessions.
     let sessionSpend: String?
     /// "N cached · P%" for the session's router prompt-cache hits. Shown under
@@ -7579,6 +7630,22 @@ private struct WalletPopover: View {
     let onAddCredits: () -> Void
     let onViewAll: () -> Void
     let onHeightChange: (CGFloat) -> Void
+
+    init(
+        sessionSpend: String?,
+        sessionCachedInputLabel: String?,
+        isAttention: Bool,
+        onAddCredits: @escaping () -> Void,
+        onViewAll: @escaping () -> Void,
+        onHeightChange: @escaping (CGFloat) -> Void
+    ) {
+        self.sessionSpend = sessionSpend
+        self.sessionCachedInputLabel = sessionCachedInputLabel
+        self.isAttention = isAttention
+        self.onAddCredits = onAddCredits
+        self.onViewAll = onViewAll
+        self.onHeightChange = onHeightChange
+    }
 
     @ObservedObject private var accountService = OsaurusRouterAccountService.shared
     @Environment(\.theme) private var theme
@@ -7978,6 +8045,15 @@ private struct SelectorChip<Content: View>: View {
 
     @State private var isHovered = false
     @Environment(\.theme) private var theme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    private var accentBlue: Color {
+        ComposerPalette.blue(
+            isDark: theme.isDark,
+            increasedContrast: colorSchemeContrast == .increased
+        )
+    }
 
     var body: some View {
         Button(action: action) {
@@ -7988,7 +8064,7 @@ private struct SelectorChip<Content: View>: View {
                 .clipShape(Capsule())
                 .overlay(chipBorder)
                 .shadow(
-                    color: isHovered || isActive ? theme.accentColor.opacity(0.1) : .clear,
+                    color: isHovered || isActive ? accentBlue.opacity(0.1) : .clear,
                     radius: 4,
                     x: 0,
                     y: 1
@@ -8007,14 +8083,18 @@ private struct SelectorChip<Content: View>: View {
     private var chipBackground: some View {
         ZStack {
             Capsule()
-                .fill(theme.secondaryBackground.opacity(isHovered || isActive ? 0.95 : 0.8))
+                .fill(
+                    theme.secondaryBackground.opacity(
+                        reduceTransparency ? 1 : (isHovered || isActive ? 0.95 : 0.8)
+                    )
+                )
 
-            if isHovered || isActive {
+            if (isHovered || isActive) && !reduceTransparency {
                 Capsule()
                     .fill(
                         LinearGradient(
                             colors: [
-                                theme.accentColor.opacity(0.06),
+                                accentBlue.opacity(0.06),
                                 Color.clear,
                             ],
                             startPoint: .topLeading,
@@ -8031,7 +8111,7 @@ private struct SelectorChip<Content: View>: View {
                 LinearGradient(
                     colors: [
                         theme.glassEdgeLight.opacity(isHovered || isActive ? 0.25 : 0.15),
-                        (isActive ? theme.accentColor : theme.primaryBorder).opacity(
+                        (isActive ? accentBlue : theme.primaryBorder).opacity(
                             isHovered || isActive ? 0.2 : 0.12
                         ),
                     ],
@@ -8045,56 +8125,32 @@ private struct SelectorChip<Content: View>: View {
 
 // MARK: - Input Action Button
 
-/// Polished circular action button for input card (media, voice, etc.)
+/// Plain toolbar icon used for composer menu actions.
 private struct SlashCommandTriggerButton: View {
     let isActive: Bool
     let action: () -> Void
 
     @State private var isHovered = false
+    @FocusState private var isKeyboardFocused: Bool
     @Environment(\.theme) private var theme
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(theme.tertiaryBackground.opacity(isHovered ? 0.95 : 0.8))
-
-                if isHovered {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [theme.accentColor.opacity(0.1), Color.clear],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                }
-
-                Text("/")
-                    .font(.system(size: 16, weight: .medium, design: .monospaced))
-                    .foregroundColor(
-                        isActive ? theme.accentColor : (isHovered ? theme.accentColor : theme.secondaryText)
-                    )
-            }
-            .frame(width: 32, height: 32)
-            .overlay(
-                Circle()
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                theme.glassEdgeLight.opacity(isHovered ? 0.25 : 0.15),
-                                theme.primaryBorder.opacity(isHovered ? 0.2 : 0.1),
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.5
+            Text("/")
+                .font(.system(size: 16, weight: .medium, design: .monospaced))
+                .modifier(
+                    ComposerToolbarButtonAppearance(
+                        isHovered: isHovered,
+                        isFocused: isKeyboardFocused,
+                        isEmphasized: isActive
                     )
             )
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .focused($isKeyboardFocused)
         .localizedHelp("Browse slash commands")
+        .accessibilityLabel(Text("Slash commands", bundle: .module))
         .onHover { isHovered = $0 }
     }
 }
@@ -8105,57 +8161,26 @@ private struct InputActionButton: View {
     let action: () -> Void
 
     @State private var isHovered = false
+    @FocusState private var isKeyboardFocused: Bool
     @Environment(\.theme) private var theme
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(theme.tertiaryBackground.opacity(isHovered ? 0.95 : 0.8))
-
-                if isHovered {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    theme.accentColor.opacity(0.1),
-                                    Color.clear,
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                }
-
-                Image(systemName: icon)
-                    .font(theme.font(size: CGFloat(theme.bodySize), weight: .medium))
-                    .foregroundColor(isHovered ? theme.accentColor : theme.secondaryText)
-            }
-            .frame(width: 32, height: 32)
-            .overlay(
-                Circle()
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                theme.glassEdgeLight.opacity(isHovered ? 0.25 : 0.15),
-                                theme.primaryBorder.opacity(isHovered ? 0.2 : 0.1),
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
+            Image(systemName: icon)
+                .font(theme.font(size: CGFloat(theme.bodySize), weight: .medium))
+                .modifier(
+                    ComposerToolbarButtonAppearance(
+                        isHovered: isHovered,
+                        isFocused: isKeyboardFocused,
+                        isEmphasized: false
                     )
-            )
-            .shadow(
-                color: isHovered ? theme.accentColor.opacity(0.15) : .clear,
-                radius: 6,
-                x: 0,
-                y: 2
             )
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .focused($isKeyboardFocused)
         .help(help)
+        .accessibilityLabel(Text(verbatim: help))
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
                 isHovered = hovering
@@ -8164,8 +8189,8 @@ private struct InputActionButton: View {
     }
 }
 
-/// `SlashCommandTriggerButton`'s circular footprint opening a themed popover
-/// of action rows — the same idiom as the model picker's sort menu
+/// The plus control opens a themed popover of action rows — the same idiom as
+/// the model picker's sort menu
 /// (`ModelPickerView.sortPopoverView` / `SortOptionRow`) — instead of a
 /// native NSMenu, so the dropdown matches the app's visual language.
 private struct InputActionMenuButton: View {
@@ -8199,48 +8224,26 @@ private struct InputActionMenuButton: View {
 
     @State private var isHovered = false
     @State private var showPopover = false
+    @FocusState private var isKeyboardFocused: Bool
     @Environment(\.theme) private var theme
 
     var body: some View {
         Button(action: { showPopover.toggle() }) {
-            ZStack {
-                Circle()
-                    .fill(theme.tertiaryBackground.opacity(isHovered ? 0.95 : 0.8))
-
-                if isHovered {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [theme.accentColor.opacity(0.1), Color.clear],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                }
-
-                Image(systemName: icon)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(isHovered ? theme.accentColor : theme.secondaryText)
-            }
-            .frame(width: 32, height: 32)
-            .overlay(
-                Circle()
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                theme.glassEdgeLight.opacity(isHovered ? 0.25 : 0.15),
-                                theme.primaryBorder.opacity(isHovered ? 0.2 : 0.1),
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.5
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .medium))
+                .modifier(
+                    ComposerToolbarButtonAppearance(
+                        isHovered: isHovered,
+                        isFocused: isKeyboardFocused,
+                        isEmphasized: showPopover
                     )
             )
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .focused($isKeyboardFocused)
         .help(help)
+        .accessibilityLabel(Text(verbatim: help))
         .onHover { isHovered = $0 }
         .popover(isPresented: $showPopover, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 4) {
@@ -8345,66 +8348,32 @@ private struct InputActionMenuButton: View {
 
 // MARK: - Send Button
 
-/// Polished send button with hover glow effect
+/// Contextual send action, shown only when the existing sendability checks pass.
 private struct SendButton: View {
     let canSend: Bool
     let action: () -> Void
 
     @State private var isHovered = false
+    @FocusState private var isKeyboardFocused: Bool
     @Environment(\.theme) private var theme
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                // Background gradient
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                theme.accentColor,
-                                theme.accentColor.opacity(0.85),
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
+            Image(systemName: "arrow.up")
+                .font(theme.font(size: CGFloat(theme.bodySize) + 1, weight: .semibold))
+                .modifier(
+                    ComposerCircularActionAppearance(
+                        kind: .send,
+                        isHovered: isHovered,
+                        isFocused: isKeyboardFocused
                     )
-
-                // Brighter overlay on hover
-                if isHovered && canSend {
-                    Circle()
-                        .fill(Color.white.opacity(0.15))
-                }
-
-                Image(systemName: "arrow.up")
-                    .font(theme.font(size: CGFloat(theme.bodySize) + 1, weight: .semibold))
-                    .foregroundColor(.white)
-            }
-            .frame(width: 32, height: 32)
-            .overlay(
-                Circle()
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(isHovered ? 0.35 : 0.2),
-                                theme.accentColor.opacity(0.3),
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-            )
-            .shadow(
-                color: theme.accentColor.opacity(isHovered && canSend ? 0.5 : 0.35),
-                radius: isHovered && canSend ? 10 : 6,
-                x: 0,
-                y: isHovered && canSend ? 4 : 2
             )
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .focused($isKeyboardFocused)
         .disabled(!canSend)
-        .opacity(canSend ? 1 : 0.5)
+        .accessibilityLabel(Text("Send", bundle: .module))
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
                 isHovered = hovering
@@ -8416,49 +8385,31 @@ private struct SendButton: View {
 
 // MARK: - Stop Button
 
-/// Polished stop button with red accent
+/// Minimal Stop action shown while a run can be cancelled.
 private struct StopButton: View {
     let action: () -> Void
 
     @State private var isHovered = false
+    @FocusState private var isKeyboardFocused: Bool
     @Environment(\.theme) private var theme
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 4) {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(.white)
-                    .frame(width: 8, height: 8)
-                Text("Stop", bundle: .module)
-                    .font(theme.font(size: CGFloat(theme.captionSize) - 1, weight: .medium))
-            }
-            .foregroundColor(.white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(
-                ZStack {
-                    Capsule()
-                        .fill(Color.red.opacity(isHovered ? 1.0 : 0.9))
-
-                    if isHovered {
-                        Capsule()
-                            .fill(Color.white.opacity(0.1))
-                    }
-                }
-            )
-            .overlay(
-                Capsule()
-                    .strokeBorder(Color.white.opacity(isHovered ? 0.3 : 0.15), lineWidth: 1)
-            )
-            .shadow(
-                color: Color.red.opacity(isHovered ? 0.4 : 0.25),
-                radius: isHovered ? 8 : 4,
-                x: 0,
-                y: 2
+            Image(systemName: "stop.fill")
+                .font(theme.font(size: CGFloat(theme.bodySize) - 1, weight: .semibold))
+                .modifier(
+                    ComposerCircularActionAppearance(
+                        kind: .stop,
+                        isHovered: isHovered,
+                        isFocused: isKeyboardFocused
+                    )
             )
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .focused($isKeyboardFocused)
+        .accessibilityLabel(Text("Stop", bundle: .module))
+        .help(Text("Stop generation", bundle: .module))
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
                 isHovered = hovering
@@ -8472,43 +8423,34 @@ private struct StopButton: View {
 
 /// Used while a run is streaming and the queue is empty. Pressing it
 /// stores the current input as a single-slot pending send (handled by
-/// the parent). Shares the exact 32×32 circular footprint of
-/// `SendButton`; the only visual delta is a muted gray fill (instead of
-/// the accent gradient) plus a hover tooltip that explains the queue
-/// semantics. The icon stays `arrow.up` so users still read it as
+/// the parent). Shares the 34×34 toolbar target of `SendButton`; a hover
+/// tooltip explains the queue semantics. The icon stays `arrow.up` so users still read it as
 /// "send".
 private struct SendQueueButton: View {
     let canSend: Bool
     let action: () -> Void
 
     @State private var isHovered = false
+    @FocusState private var isKeyboardFocused: Bool
     @Environment(\.theme) private var theme
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(theme.tertiaryBackground.opacity(canSend ? 0.95 : 0.7))
-
-                if isHovered && canSend {
-                    Circle()
-                        .fill(theme.accentColor.opacity(0.12))
-                }
-
-                Image(systemName: "arrow.up")
-                    .font(theme.font(size: CGFloat(theme.bodySize) + 1, weight: .semibold))
-                    .foregroundColor(theme.secondaryText)
-            }
-            .frame(width: 32, height: 32)
-            .overlay(
-                Circle()
-                    .strokeBorder(theme.secondaryText.opacity(isHovered ? 0.35 : 0.2), lineWidth: 1)
+            Image(systemName: "arrow.up")
+                .font(theme.font(size: CGFloat(theme.bodySize) + 1, weight: .semibold))
+                .modifier(
+                    ComposerToolbarButtonAppearance(
+                        isHovered: isHovered,
+                        isFocused: isKeyboardFocused,
+                        isEmphasized: canSend
+                    )
             )
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .focused($isKeyboardFocused)
         .disabled(!canSend)
-        .opacity(canSend ? 1 : 0.5)
+        .accessibilityLabel(Text("Queue message", bundle: .module))
         .localizedHelp("Queue message · sent when current run finishes")
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
@@ -8524,62 +8466,31 @@ private struct SendQueueButton: View {
 
 /// Accent-tinted variant that stops the active run and dispatches the
 /// queued send immediately. Visible only when a queued message exists.
-/// Same 32×32 circular footprint as `SendButton`; differentiated by a
+/// Same 34×34 toolbar target as `SendButton`; differentiated by a
 /// `bolt.fill` icon (signals "urgent / now") and a hover tooltip.
 private struct SendNowButton: View {
     let action: () -> Void
 
     @State private var isHovered = false
+    @FocusState private var isKeyboardFocused: Bool
     @Environment(\.theme) private var theme
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                theme.accentColor,
-                                theme.accentColor.opacity(0.85),
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
+            Image(systemName: "bolt.fill")
+                .font(theme.font(size: CGFloat(theme.bodySize) + 1, weight: .semibold))
+                .modifier(
+                    ComposerToolbarButtonAppearance(
+                        isHovered: isHovered,
+                        isFocused: isKeyboardFocused,
+                        isEmphasized: true
                     )
-
-                if isHovered {
-                    Circle()
-                        .fill(Color.white.opacity(0.15))
-                }
-
-                Image(systemName: "bolt.fill")
-                    .font(theme.font(size: CGFloat(theme.bodySize) + 1, weight: .semibold))
-                    .foregroundColor(.white)
-            }
-            .frame(width: 32, height: 32)
-            .overlay(
-                Circle()
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(isHovered ? 0.35 : 0.2),
-                                theme.accentColor.opacity(0.3),
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-            )
-            .shadow(
-                color: theme.accentColor.opacity(isHovered ? 0.5 : 0.35),
-                radius: isHovered ? 10 : 6,
-                x: 0,
-                y: isHovered ? 4 : 2
             )
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .focused($isKeyboardFocused)
+        .accessibilityLabel(Text("Send queued message now", bundle: .module))
         .localizedHelp("Send now · interrupts current run")
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
@@ -8650,15 +8561,15 @@ private struct SendNowButton: View {
 
 /// Balance indicator shown in every session where the router is usable.
 /// Extracted from `FloatingInputCard` so wallet-panel hover/pin state and
-/// Pool chip for a chat with a teammate's shared agent. Mirrors the personal
-/// credits chip: the number is what the workspace has LEFT to spend (the
+/// Pool chip for a chat with a teammate's shared agent. The number is what the
+/// workspace has LEFT to spend (the
 /// pool balance from `WorkspacesService.poolBalances`), because a spend
 /// figure beside a teammate's agent read as "this workspace has 0 credits".
 /// The run is drawn from that pool, not this device's wallet; the host
 /// relays each billed step over the run stream, which refreshes the balance
 /// so it ticks down live. Session spend stays in the tooltip. Passive
-/// status in the meta cluster (same `SelectorChip` chrome as the credits
-/// chip); clicking opens Workspaces.
+/// status in the meta cluster (same `SelectorChip` chrome as other composer
+/// controls); clicking opens Workspaces.
 private struct FloatingWorkspacePoolChip: View {
     let workspaceName: String
     /// nil only when the tab's workspace is unknown; the click then falls
@@ -8781,350 +8692,6 @@ private struct FloatingWorkspacePoolChip: View {
             )
         }
         return String(format: L("%@'s workspace pool. %@ spent this session."), workspaceName, spendDisplay)
-    }
-}
-
-/// account-service updates re-render only this chip, never the whole card.
-/// Hovering previews the wallet panel; clicking pins it so its actions
-/// (Add credits → top-up sheet, View all → Credits tab) are reachable.
-/// Quiet plain text normally, escalating to an amber pill / "Add credits"
-/// CTA as the balance runs low or hits zero — router-billed sessions only.
-private struct FloatingCreditsChip: View {
-    let isRouterBilledSession: Bool
-    /// Total micro-USD spent on the Osaurus Router this session (popover row).
-    let sessionSpendMicro: Int
-    /// Session prompt-cache hit label for the popover's spend row; nil hides it.
-    let sessionCachedInputLabel: String?
-    let metaCompact: Bool
-    let metaUltraCompact: Bool
-    let onAddCredits: (() -> Void)?
-
-    @ObservedObject private var accountService = OsaurusRouterAccountService.shared
-    @Environment(\.theme) private var theme
-
-    /// Wallet panel presentation. Hovering the chip opens it as a passive
-    /// preview (dismissed on hover exit); clicking pins it so its actions
-    /// (Add credits, View all) are reachable.
-    @State private var showWalletPanel = false
-    /// True when the wallet panel was opened by click; hover exit no longer
-    /// dismisses it, only outside-click / an action does.
-    @State private var walletPanelPinned = false
-    @State private var walletHover = HoverPreviewPresence()
-    /// Measured before the first presentation, then updated as activity loads.
-    @State private var walletPanelHeight: CGFloat = 0
-    @State private var balanceHoverTask: Task<Void, Never>?
-    /// Delayed dismiss for the hover-opened wallet panel. Gives the cursor a
-    /// grace period to travel from the chip into the panel (which lives in its
-    /// own window, so hovering it doesn't keep the chip "hovered"); the panel's
-    /// own hover cancels it so its buttons stay clickable.
-    @State private var walletDismissTask: Task<Void, Never>?
-
-    /// Urgency tiers for the balance indicator. Healthy stays quiet (plain muted
-    /// text that blends into the meta cluster); low and empty escalate to an
-    /// amber pill so a top-up is easy to notice. Empty/frozen reads as an "Add
-    /// credits" call to action — deliberately amber, never error-red, so it
-    /// invites action instead of looking like a failure. The escalation only
-    /// applies to router-billed sessions; see `creditsStyle(for:)`.
-    private enum BalanceLevel {
-        case healthy
-        case low
-        case empty
-    }
-
-    private var balanceLevel: BalanceLevel {
-        let micro = accountService.balanceMicroValue
-        if micro <= 0 || accountService.isFrozen {
-            return .empty
-        }
-        if micro < 1_000_000 {  // < 10,000 credits ($1.00)
-            return .low
-        }
-        return .healthy
-    }
-
-    /// Resolved visual tokens for one `BalanceLevel` so the body can render
-    /// declaratively instead of re-deriving each property from the level inline.
-    private struct CreditsChipStyle {
-        let iconName: String
-        let iconColor: Color
-        let textColor: Color
-        let weight: Font.Weight
-        /// Pill fill/stroke; `nil` keeps the chip chrome-free (healthy state).
-        let pill: (fill: Color, stroke: Color)?
-        let glow: Color
-        /// When false, the chip shows the "Add credits" CTA instead of an amount.
-        let showsAmount: Bool
-    }
-
-    private func creditsStyle(for level: BalanceLevel) -> CreditsChipStyle {
-        let amber = theme.warningColor
-        // Outside router-billed sessions the chip never escalates: the balance
-        // doesn't block the current session, so a $0/unknown wallet reads as
-        // quiet muted "Add credits" text instead of an amber call to action.
-        guard isRouterBilledSession else {
-            return CreditsChipStyle(
-                iconName: "cloud",
-                iconColor: theme.tertiaryText,
-                textColor: theme.secondaryText,
-                weight: .medium,
-                pill: nil,
-                glow: .clear,
-                showsAmount: level != .empty
-            )
-        }
-        switch level {
-        case .healthy:
-            return CreditsChipStyle(
-                iconName: "cloud",
-                iconColor: theme.tertiaryText,
-                textColor: theme.secondaryText,
-                weight: .medium,
-                pill: nil,
-                glow: .clear,
-                showsAmount: true
-            )
-        case .low:
-            // The chip shows the router balance, so a low balance escalates the
-            // chip itself to amber text (no pill) — a gentle nudge that stops
-            // short of the empty-state "Add credits" call to action.
-            return CreditsChipStyle(
-                iconName: "cloud",
-                iconColor: amber,
-                textColor: amber,
-                weight: .semibold,
-                pill: nil,
-                glow: .clear,
-                showsAmount: true
-            )
-        case .empty:
-            return CreditsChipStyle(
-                iconName: "plus.circle.fill",
-                iconColor: amber,
-                textColor: amber,
-                weight: .semibold,
-                pill: (amber.opacity(0.22), amber.opacity(0.5)),
-                glow: amber.opacity(0.25),
-                showsAmount: false
-            )
-        }
-    }
-
-    /// This session's Router spend, formatted for the hover popover. The chip
-    /// surfaces the account balance; spend is shown only in the popover.
-    private var sessionSpendDisplay: String {
-        OsaurusRouter.formatMicroAsCredits(String(sessionSpendMicro))
-    }
-
-    /// Accessibility text for the credits chip. Describes the router balance the
-    /// chip shows and the tap action; session spend lives in the wallet panel.
-    private var creditsHelpText: Text {
-        if accountService.isFrozen {
-            return Text("Account paused - add credits to resume.", bundle: .module)
-        }
-        return Text("\(accountService.formattedBalance) router balance. Click to open the wallet.", bundle: .module)
-    }
-
-    var body: some View {
-        let level = balanceLevel
-        let style = creditsStyle(for: level)
-        let caption = CGFloat(theme.captionSize)
-        // Hide the icon in compact mode to save width, except the empty-state
-        // plus glyph, which signals the chip is actionable. In the ultra-compact
-        // tier we always keep the icon, since it becomes the whole chip.
-        let showIcon = !metaCompact || level == .empty || metaUltraCompact
-        // At the tightest width the chip is icon-only (glyph carries the state,
-        // hover/tap opens the wallet) so the row's toggle chips aren't clipped.
-        let showLabel = !metaUltraCompact
-
-        Group {
-            if style.pill == nil {
-                // Balance states: the same pill chrome as the model selector
-                // chip (`SelectorChip`) so the meta cluster's interactive
-                // chips read as one family.
-                SelectorChip(isActive: showWalletPanel && walletPanelPinned) {
-                    handleChipTap(level: level)
-                } content: {
-                    chipLabel(style: style, caption: caption, showIcon: showIcon, showLabel: showLabel)
-                }
-            } else {
-                // Empty state keeps its own amber "Add credits" CTA pill.
-                Button {
-                    handleChipTap(level: level)
-                } label: {
-                    chipLabel(style: style, caption: caption, showIcon: showIcon, showLabel: showLabel)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background {
-                            if let pill = style.pill {
-                                Capsule()
-                                    .fill(pill.fill)
-                                    .overlay(Capsule().strokeBorder(pill.stroke, lineWidth: 1))
-                            }
-                        }
-                        // Soft glow on the empty CTA draws the eye without a
-                        // repeating animation.
-                        .shadow(color: style.glow, radius: 5, x: 0, y: 1)
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .pointingHandCursor()
-            }
-        }
-        .accessibilityLabel(creditsHelpText)
-        .onHover { hovering in
-            walletHover.isOverTrigger = hovering
-            balanceHoverTask?.cancel()
-            // Empty state: the chip is a direct "Add credits" CTA (click opens
-            // the top-up sheet), so no hover preview — surfacing the wallet
-            // panel there just re-offers the same action with an extra hop.
-            guard level != .empty || onAddCredits == nil else {
-                if !hovering, !walletPanelPinned { scheduleWalletDismiss() }
-                return
-            }
-            if hovering {
-                walletDismissTask?.cancel()
-                balanceHoverTask = Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 300_000_000)
-                    guard !Task.isCancelled else { return }
-                    showWalletPanel = true
-                }
-            } else if !walletPanelPinned {
-                scheduleWalletDismiss()
-            }
-        }
-        .anchoredCard(
-            isPresented: $showWalletPanel,
-            size: CGSize(width: PickerCardMetrics.infoCardWidth, height: walletPanelHeight),
-            alignment: .trailing,
-            constrainToWindow: true,
-            takesFocus: walletPanelPinned,
-            accessibilityLabel: L("Credits")
-        ) {
-            WalletPopover(
-                sessionSpend: isRouterBilledSession ? sessionSpendDisplay : nil,
-                sessionCachedInputLabel: isRouterBilledSession ? sessionCachedInputLabel : nil,
-                isAttention: isRouterBilledSession && balanceLevel != .healthy,
-                onAddCredits: {
-                    closeWalletPanel()
-                    onAddCredits?()
-                },
-                onViewAll: {
-                    closeWalletPanel()
-                    AppDelegate.shared?.showManagementWindow(initialTab: .credits)
-                },
-                onHeightChange: { walletPanelHeight = $0 }
-            )
-            .contentShape(Rectangle())
-            .onHover { hovering in
-                walletHover.isOverPanel = hovering
-                if hovering {
-                    walletDismissTask?.cancel()
-                } else if !walletPanelPinned {
-                    scheduleWalletDismiss()
-                }
-            }
-        }
-        .onChange(of: showWalletPanel) { _, isShown in
-            // Outside-click dismissal flips the binding directly; unpin so the
-            // next hover preview behaves normally.
-            if !isShown {
-                walletHover.isOverPanel = false
-                walletPanelPinned = false
-                walletPanelHeight = 0
-                balanceHoverTask?.cancel()
-                walletDismissTask?.cancel()
-            }
-        }
-        .onDisappear {
-            balanceHoverTask?.cancel()
-            walletDismissTask?.cancel()
-        }
-    }
-
-    /// The chip's icon + amount/CTA line, shared by the `SelectorChip`
-    /// (balance states) and the amber CTA pill (empty state).
-    @ViewBuilder
-    private func chipLabel(
-        style: CreditsChipStyle,
-        caption: CGFloat,
-        showIcon: Bool,
-        showLabel: Bool
-    ) -> some View {
-        HStack(spacing: 4) {
-            if showIcon {
-                Image(systemName: style.iconName)
-                    .font(.system(size: caption - 2))
-                    .foregroundColor(style.iconColor)
-                    .contentTransition(.symbolEffect(.replace))
-            }
-
-            if showLabel {
-                if style.showsAmount {
-                    // Composer shows the overall router balance; this session's
-                    // spend is surfaced only in the hover popover. Abbreviated
-                    // ("212.1K credits") so six-figure balances don't crowd
-                    // the meta cluster.
-                    Text(verbatim: accountService.compactFormattedBalance)
-                        .font(.system(size: caption - 1, weight: style.weight, design: .monospaced))
-                        .foregroundColor(style.textColor)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                } else {
-                    Text("Add credits", bundle: .module)
-                        .font(theme.font(size: caption - 1, weight: style.weight))
-                        .foregroundColor(style.textColor)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-            }
-        }
-    }
-
-    private func handleChipTap(level: BalanceLevel) {
-        balanceHoverTask?.cancel()
-        walletDismissTask?.cancel()
-        // Empty state: the chip IS the "Add credits" call to action, so a
-        // click opens the top-up sheet directly — routing it through the
-        // wallet panel just to click a second "Add credits" there was an
-        // extra hop with no information gain.
-        if level == .empty, let onAddCredits {
-            showWalletPanel = false
-            walletPanelPinned = false
-            onAddCredits()
-            return
-        }
-        // Otherwise click pins the wallet panel (rather than jumping straight
-        // to the top-up sheet) so its actions stay reachable; a second click
-        // while pinned closes it.
-        if showWalletPanel && walletPanelPinned {
-            showWalletPanel = false
-            walletPanelPinned = false
-        } else {
-            walletPanelPinned = true
-            showWalletPanel = true
-        }
-    }
-
-    /// Dismiss the hover-opened wallet panel after a grace period, giving the
-    /// cursor time to cross the gap into the panel window.
-    private func scheduleWalletDismiss() {
-        balanceHoverTask?.cancel()
-        walletDismissTask?.cancel()
-        guard walletHover.shouldDismiss(isPinned: walletPanelPinned) else { return }
-        walletDismissTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled,
-                walletHover.shouldDismiss(isPinned: walletPanelPinned)
-            else { return }
-            showWalletPanel = false
-        }
-    }
-
-    private func closeWalletPanel() {
-        walletDismissTask?.cancel()
-        balanceHoverTask?.cancel()
-        showWalletPanel = false
-        walletPanelPinned = false
     }
 }
 
@@ -9572,15 +9139,87 @@ private struct VoiceStateSyncObservers: ViewModifier {
 }
 
 /// Observation firewall for the selector row. Sandbox provisioning publishes
-/// per-progress-tick during runtime downloads and the clipboard service
-/// publishes on every copy; hosting those subscriptions here means their
-/// updates re-render only this subtree. The wrapped closure captures the
-/// card value and re-reads the live singleton state (via the card's derived
-/// properties) each time this scope's body runs, so the chips always render
-/// current sandbox/clipboard state without the card observing either object.
+/// per-progress-tick during runtime downloads; keeping that subscription here
+/// re-renders only this subtree. The wrapped closure captures the card value
+/// and re-reads singleton state each time this scope's body runs.
+private struct ContextualClipboardPasteButton: View {
+    let isMonitoringEnabled: Bool
+    let onPaste: () -> Void
+    let onPasteTextToInput: (String) -> Void
+
+    @ObservedObject private var clipboardService = ClipboardService.shared
+    @State private var isHovered = false
+    @FocusState private var isKeyboardFocused: Bool
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Group {
+            if isMonitoringEnabled, clipboardService.hasNewContent,
+                let content = clipboardService.currentContent
+            {
+                Button(action: onPaste) {
+                    Image(systemName: "doc.on.clipboard")
+                        .font(theme.font(size: CGFloat(theme.bodySize), weight: .medium))
+                        .modifier(
+                            ComposerToolbarButtonAppearance(
+                                isHovered: isHovered,
+                                isFocused: isKeyboardFocused,
+                                isEmphasized: true
+                            )
+                        )
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                .focused($isKeyboardFocused)
+                .accessibilityLabel(pasteHelp(for: content))
+                .accessibilityHint(Text("Adds the detected clipboard item to this composer.", bundle: .module))
+                .help(pasteHelp(for: content))
+                .contextMenu {
+                    Button {
+                        clipboardService.markAsRead()
+                    } label: {
+                        Text("Dismiss", bundle: .module)
+                    }
+                    Divider()
+                    switch content {
+                    case .text(let text):
+                        Button {
+                            onPasteTextToInput(text)
+                            clipboardService.markAsRead()
+                        } label: {
+                            Text("Paste to Input", bundle: .module)
+                        }
+                    case .file:
+                        Button(action: onPaste) {
+                            Text("Attach File", bundle: .module)
+                        }
+                    case .image:
+                        Button(action: onPaste) {
+                            Text("Attach Image", bundle: .module)
+                        }
+                    }
+                }
+                .onHover { isHovered = $0 }
+                .transition(.opacity.combined(with: .scale(scale: 0.94)))
+            }
+        }
+    }
+
+    private func pasteHelp(for content: ClipboardService.ClipboardContent) -> Text {
+        let source = clipboardService.lastSourceApp ?? "clipboard"
+        switch content {
+        case .text:
+            return Text(localized: "Paste text from \(source)")
+        case .image:
+            return Text(localized: "Paste image from \(source)")
+        case .file:
+            return Text(localized: "Paste file from \(source)")
+        }
+    }
+}
+
 private struct ChipObservationScope<Content: View>: View {
     @ObservedObject private var sandboxState = SandboxManager.State.shared
-    @ObservedObject private var clipboardService = ClipboardService.shared
     /// The card's composer text model: the row's context chip shows a live
     /// token count that includes what's being typed, so the row re-renders
     /// per keystroke here instead of the whole card observing the text.

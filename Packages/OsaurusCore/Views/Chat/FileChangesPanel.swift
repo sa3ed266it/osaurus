@@ -2,8 +2,8 @@
 //  FileChangesPanel.swift
 //  osaurus
 //
-//  Session-scoped File Changes pane of the chat inspector (see
-//  `ChatInspectorPanel`, which owns the rail chrome and lens bar). The
+//  Session-scoped File Changes surface inside the left content panel (see
+//  `ChatLeftNavigationPanel`, which owns its mode dropdown). The
 //  header row carries the "N files changed · M changes" summary and Revert
 //  All; the row under it the Timeline | Files chips. Timeline lists every change set
 //  (one per tool call, plus reverts) with its files and diffs, revertible

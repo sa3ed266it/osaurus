@@ -2,11 +2,10 @@
 //  ProjectInspectorPanel.swift
 //  osaurus
 //
-//  The chat window's right rail while a project is on screen: the
-//  project's settings (instructions, knowledge, working folder, shared
-//  memory, default agent), in the same container, width and resize seam
-//  as the chat inspector. "About what's on screen" is the rail's job on
-//  both kinds of content; the settings of a project are that.
+//  The chat window's project-specific right panel on project detail pages:
+//  instructions, knowledge, working folder, shared memory, and default agent.
+//  Chat History and File Changes live in the content panel beside the
+//  permanent left navigation rail.
 //
 
 import AppKit
@@ -41,7 +40,12 @@ struct ProjectInspectorPanel: View {
     @State private var folderDisplayPath: String?
 
     var body: some View {
-        SidebarContainer(attachedEdge: .trailing, topPadding: 40, width: width) {
+        SidebarContainer(
+            attachedEdge: .trailing,
+            topPadding: 0,
+            width: width,
+            showsBorder: false
+        ) {
             SidebarTitleRow("Project Settings")
 
             ScrollView {

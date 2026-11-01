@@ -16,13 +16,14 @@ Every **custom-agent** chat is an agent loop: the model thinks, calls tools, tra
 - Clarifying questions: when the agent needs input, a bottom overlay appears (optionally with answer chips); answering resumes the run.
 - Artifacts: files, charts, and reports the agent shares appear as cards; artifacts are stored under `~/.osaurus/artifacts/<sessionId>/`.
 
-## Sidebar and inspector
+## Chat navigation and the content panel
 
-The chat window has a rail on each side, both toggled from the ends of the toolbar (sidebar button on the left, inspector button on the right) and both resizable by dragging their inner edge.
+The chat window keeps a permanent 58pt navigation rail beside the canvas. The rail is never hidden. Its **Chats** button opens a collapsible content panel immediately to its right; **⌘B** and the leading toolbar button toggle that panel. The panel opens on **Chats** by default and its header menu switches between **Chats** and **File Changes**. At narrow widths it temporarily overlays the canvas rather than squeezing it; the same controls work in full screen.
 
-- The **sidebar** (left) is where you choose what to open: its lens bar switches between **Agents** (one row per agent — pick one to chat with it, or use the row's + for a fresh chat) and **Projects**. Under the lens bar, a header row counts what the lens holds (“8 agents”, “3 projects”) with the lens's **+** (New Agent, New Project) on the right, and a search field narrows the list by name — for agents it also filters your workspaces' shared agents and network peers. **Settings** sits at the foot of the rail.
-- The **inspector** (right) is about what is on screen. For a chat, its lens bar switches between **File Changes** (this chat's edits, see below) and **History** — the past conversations of this chat's agent, with search, a **Filter** for source, project, workspace and archived chats, and **New Chat** and **Import Conversations** in its header. While a chat has no file changes yet, opening the inspector shows History; File Changes takes over once the first change lands (or when you pick it in the lens bar). Selecting a past chat opens it in the current tab and the rail stays open; the row's actions offer a new tab or window. Switch to a tab with a different agent and History follows.
-- Open a **project** from the sidebar and the content area shows the project as a folder of chats — the same list and search as History, with **New Chat** and **Add Chats** in its header row — while the inspector shows **Project Settings**: instructions, knowledge collections, working folder, shared memory and the default agent. The same toolbar button shows and hides it, and it keeps the inspector's width.
+- The permanent rail contains **Chats**, **Projects**, **Settings**, and the active agent avatar. The **Projects** and agent flyouts keep their existing search, switching, and project actions.
+- **Chats** shows the existing history list scoped to the active agent or workspace. Search and **Filter** cover source, project, workspace, archived, and capability lenses. Its header has **New Chat** and **Import Conversations**. Select a chat to open it in the current tab; row actions also offer a new tab or window. Rename, pin, archive, delete, export, import, and running-session controls remain available.
+- **File Changes** shows edits made by the current chat. Its Timeline and Files views, diff/review, approval prompts, revert and undo actions use the existing file-change journal. A file-change badge on a chat row or **View changes** under a changed answer opens this panel for that chat; a focused change link selects its change set.
+- Open a **project** from the Projects flyout and the content area shows that project's chats — the same list and search as Chats, with **New Chat** and **Add Chats**. The trailing toolbar button then opens **Project Settings** on the right: instructions, knowledge collections, working folder, shared memory, and default agent. Project Settings is separate from the Chats/File Changes panel and retains its own width.
 
 ## Working folder
 
@@ -42,8 +43,7 @@ The same formats work on `/workspace/...` paths in the sandbox.
 
 Every file a chat creates, edits, or deletes is snapshotted before and after the change, so nothing the agent does to your files is final. Three ways in:
 
-- The **inspector** button at the right of the chat toolbar (the mirror of the sidebar button on the left) opens the rail beside the chat; its **File Changes** lens is this chat's edits. While the rail is closed, the button's badge counts the files this chat still has changed. Drag the rail's inner edge to resize it, like the sidebar.
-- The **badge on a chat** in the inspector's History shows how many files that chat still has changed; clicking it opens the same panel.
+- A chat's file-change badge in **Chats** shows its outstanding edits; clicking it opens that chat and switches the content panel to **File Changes**.
 - Under an answer that changed files, **“N files changed · View changes”** opens the panel on that turn, and every file-edit card in the transcript has its own **Revert** / **View change**.
 
 Inside the panel, the header row summarizes “N files changed · M changes” and offers two views as chips: **Timeline** lists every change in order (one row per edit or command, grouped under the request that caused it) — expand a row to see which files it touched and a before/after difference for each. **Files** shows the net result per file: what it was before this chat versus what it is now.

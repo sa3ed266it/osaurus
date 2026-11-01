@@ -177,6 +177,32 @@ extension ThemeProtocol {
     var glassTintOpacity: Double { 0 }
     var windowBackingOpacity: Double { 0.55 }
 
+    /// The saved backing strength is intended for a filled window surface, so
+    /// it is too strong to apply directly over native behind-window glass.
+    /// Map it to a tint capped at 3%, leaving nearly all of the AppKit material
+    /// visible while preserving each theme's light/dark palette.
+    var chatWindowGlassTintOpacity: Double {
+        min(max(windowBackingOpacity, 0), 1) * 0.03
+    }
+
+    /// Solid palette color used when the native chat-window glass is disabled.
+    /// An explicitly configured solid background takes precedence.
+    var chatWindowSolidFallback: Color {
+        if let config = customThemeConfig,
+            case .solid = config.background.type,
+            let solidColor = config.background.solidColor
+        {
+            return Color(themeHex: solidColor)
+        }
+        return primaryBackground
+    }
+
+    /// Solid surface used by the native titlebar and navigation rail when
+    /// Reduce Transparency disables the shared window material.
+    var chatWindowChromeSolidFallback: Color {
+        sidebarBackground
+    }
+
     var backgroundImage: NSImage? { nil }
     var backgroundImageOpacity: Double { 1.0 }
     var backgroundOverlayColor: Color? { nil }

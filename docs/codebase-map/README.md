@@ -1,6 +1,6 @@
 # Codebase Map
 
-This is the source-checked navigation index for the upstream Osaurus repository. It was written against HEAD c0da268a4258e8f6db7c3bafab96cf93dac0d6b9 on branch main (2026-10-31). It routes work to likely owners; source and focused tests remain authoritative.
+This is the source-checked navigation index for the upstream Osaurus repository. Its initial broad source check was against HEAD c0da268a4258e8f6db7c3bafab96cf93dac0d6b9 on branch main (2026-10-31); chat-window glass, toolbar, compact-navigation, and collapsible Chats/File Changes panel routes were updated alongside their implementation on 2026-10-31. It routes work to likely owners; source and focused tests remain authoritative.
 
 ## Start here on every task
 

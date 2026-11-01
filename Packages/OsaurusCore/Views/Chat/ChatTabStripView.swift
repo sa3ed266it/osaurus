@@ -3,13 +3,14 @@
 //  osaurus
 //
 //  Tab strip for chat windows, hosted in the toolbar's centered slot (the
-//  space the agent pill vacated when it moved into the sidebar) and in the
+//  slot previously occupied by the toolbar agent pill, now represented by
+//  the compact rail's active-agent avatar) and in the
 //  themed full-screen header. Follows Safari's compact-tab grammar in the
 //  sidebar lens bar's palette: one recessed rounded track holds equal-width
 //  tabs with centered titles, the active tab is an accent-tinted pill, and
 //  inactive tabs are flat labels separated by hairline dividers that hide
-//  next to the active/hovered tab. "+" and the overflow menu sit outside
-//  the track.
+//  next to the active/hovered tab. The overflow menu sits outside the track;
+//  new-conversation chrome is grouped with the trailing window actions.
 //
 
 import AppKit
@@ -28,16 +29,6 @@ struct ChatTabStripView: View {
     /// the chrome BEFORE the strip, so it holds still during a window resize.
     @State private var measuredChromeX: CGFloat?
 
-    /// Fallback for the width of the chrome AFTER this item (the inspector
-    /// toggle and window pin, plus toolbar padding), used only until the
-    /// first live measurement lands (see `measuredTrailingChrome`).
-    var trailingChromeWidth: CGFloat = 80
-
-    /// Distance from the strip's trailing edge to the window's trailing
-    /// edge, measured from AppKit like `measuredChromeX`. Only depends on
-    /// the chrome after the strip, so it too holds still during a resize.
-    @State private var measuredTrailingChrome: CGFloat?
-
     /// Last laid-out strip width, for drag math that runs outside `body`.
     @State private var lastStripWidth: CGFloat = 0
 
@@ -47,7 +38,7 @@ struct ChatTabStripView: View {
     /// trailing items, in the same layout pass as the window resize), so a
     /// fast resize can never race a measurement.
     private func stripWidth(in available: CGFloat) -> CGFloat {
-        max(0, available - leadingInset - trailingInset)
+        max(0, available - leadingInset)
     }
 
     /// How far the strip must start past its own leading edge so the first
@@ -56,15 +47,6 @@ struct ChatTabStripView: View {
     /// strip. Zero when the sidebar is narrower than that chrome.
     static func leadingInset(sidebarWidth: CGFloat, chromeWidth: CGFloat) -> CGFloat {
         max(0, sidebarWidth - chromeWidth)
-    }
-
-    /// Mirror image for the right rail: the inspector's width less the
-    /// chrome (rail toggle, pin, toolbar padding) already after the strip,
-    /// so the last tab and "+" end at the chat column's trailing edge
-    /// instead of running under the rail. Zero while the rail is closed or
-    /// narrower than that chrome.
-    static func trailingInset(inspectorWidth: CGFloat, chromeWidth: CGFloat) -> CGFloat {
-        max(0, inspectorWidth - chromeWidth)
     }
 
     /// Hover is tracked at strip level (not per item) so separators can
@@ -78,38 +60,18 @@ struct ChatTabStripView: View {
     @State private var draggingTabId: UUID?
     @State private var dragOffset: CGFloat = 0
 
-    /// Keeps the first tab at the CONTENT area's left edge while the
-    /// sidebar is open — without it the tabs float over the sidebar.
-    /// `sidebarColumnWidth` is the rail's on-screen width as `ChatView`
-    /// laid it out: 0 while hidden or pushed aside by the inspector at
-    /// narrow widths (the tabs return to the window's left edge), and the
-    /// LIVE value during a resize drag — reading the persisted defaults key
-    /// here instead made the tabs lag the rail until the drag released.
+    /// Keeps the first tab at the chat canvas' left edge. The reported width
+    /// includes the permanent rail and the docked Chats / File Changes panel;
+    /// it remains 58pt while that panel is closed or temporarily overlaid.
     private var leadingInset: CGFloat {
         let inset = Self.leadingInset(
-            sidebarWidth: windowState.sidebarColumnWidth,
+            sidebarWidth: windowState.leadingNavigationWidth,
             chromeWidth: measuredChromeX ?? leadingChromeWidth)
         return inset > 0 ? inset + Self.edgeGap : 0
     }
 
-    /// The one visual gap the strip keeps around its parts: from an open
-    /// rail's divider to the track, from the track to "+", and from "+" to
-    /// the right rail's divider.
+    /// The visual gap between the navigation area and the tab track.
     static let edgeGap: CGFloat = 12
-    /// Transparent padding `HeaderActionButton` wraps around its circle;
-    /// gaps beside the "+" button subtract it so the VISIBLE gap is `edgeGap`.
-    private static let headerButtonPadding: CGFloat = 4
-
-    /// Keeps the tabs clear of the right rail (chat inspector or Project
-    /// Settings). `inspectorColumnWidth` is the rail's on-screen width as
-    /// `ChatView` laid it out — squeezed at narrow windows, live during a
-    /// resize drag — so the strip tracks it without a second computation.
-    private var trailingInset: CGFloat {
-        let inset = Self.trailingInset(
-            inspectorWidth: windowState.inspectorColumnWidth,
-            chromeWidth: measuredTrailingChrome ?? trailingChromeWidth)
-        return inset > 0 ? inset + Self.edgeGap - Self.headerButtonPadding : 0
-    }
 
     var body: some View {
         // Tabs are chat chrome; the project detail page hides them along
@@ -118,10 +80,8 @@ struct ChatTabStripView: View {
             GeometryReader { proxy in
                 let width = stripWidth(in: proxy.size.width)
                 // Every tab renders at `maxTabWidth`, computed so the tabs
-                // fill the track and the row NEVER exceeds the strip. An
-                // overflowing row would push the "+" button outside the
-                // toolbar item's bounds, where it still draws but no longer
-                // hit-tests.
+                // fill the track and the row never exceeds the strip. An
+                // overflowing row could escape the toolbar item's bounds.
                 tabsRow(stripWidth: width)
                     // Tour spotlight anchor (invisible; reports the strip's frame).
                     .background(TourAnchorMarker(anchor: .tabStrip))
@@ -155,22 +115,8 @@ struct ChatTabStripView: View {
                 }
                 .frame(width: 0)
             }
-            // Same at the OUTER trailing edge: the distance from there to
-            // the window's edge is the trailing chrome, whatever AppKit (or
-            // the full-screen header) puts after the strip.
-            .background(alignment: .trailing) {
-                WindowEdgeReader(edge: .trailing) { gap in
-                    if abs((measuredTrailingChrome ?? -1) - gap) > 0.5 {
-                        measuredTrailingChrome = gap
-                    }
-                }
-                .frame(width: 0)
-            }
-            // Rail open/close slides the tabs along with the rail; keyed on
-            // presence, not width, so a live resize drag is not lagged by
-            // the animation.
-            .animation(windowState.theme.animationQuick(), value: windowState.sidebarColumnWidth > 0)
-            .animation(windowState.theme.animationQuick(), value: windowState.inspectorColumnWidth > 0)
+            // The tab strip follows the docked left navigation width.
+            .animation(windowState.theme.animationQuick(), value: windowState.leadingNavigationWidth)
             // Leaving the strip ends a close streak: widths relax to fit.
             .onHover { inside in
                 guard !inside, frozenTabWidth != nil else { return }
@@ -195,7 +141,7 @@ struct ChatTabStripView: View {
     }
 
     /// Per-tab width: the track's width shared equally (Safari), shrunk as
-    /// tabs multiply so the whole row (track + "+" button) always fits
+    /// tabs multiply so the whole row (track + optional overflow menu) fits
     /// inside the strip.
     private func fittedTabWidth(stripWidth: CGFloat) -> CGFloat {
         let visibleCount = visibleTabs(stripWidth: stripWidth).count
@@ -209,10 +155,10 @@ struct ChatTabStripView: View {
         return max(Self.minTabWidth, available / count)
     }
 
-    /// Width left for tabs and their separators once the "+" button and
-    /// the track's inner padding are taken out.
+    /// Width left for tabs and their separators once the track's inner
+    /// padding is taken out.
     private func tabsBudget(stripWidth: CGFloat) -> CGFloat {
-        stripWidth - Self.plusButtonReserve - 2 * Self.trackPadding
+        stripWidth - 2 * Self.trackPadding
     }
 
     static let stripHeight: CGFloat = 30
@@ -228,15 +174,12 @@ struct ChatTabStripView: View {
 
     /// Narrowest chip: avatar only, no title.
     static let minTabWidth: CGFloat = 56
-    /// Lead-in gap plus the 28pt circle and its transparent padding.
-    private static let plusButtonReserve: CGFloat = (edgeGap - headerButtonPadding) + 28 + 2 * headerButtonPadding
     private static let overflowButtonReserve: CGFloat = 40
 
-    /// Narrowest the toolbar item may get: one compact tab in its track,
-    /// the overflow chevron and "+". AppKit folds the trailing buttons
-    /// before it squeezes the strip below this.
+    /// Narrowest the toolbar item may get while preserving one compact tab
+    /// and room for the overflow chevron.
     static let minimumItemWidth: CGFloat =
-        minTabWidth + 2 * trackPadding + overflowButtonReserve + plusButtonReserve
+        minTabWidth + 2 * trackPadding + overflowButtonReserve
 
     /// How many tabs fit at the floor width, keeping the active tab visible.
     /// Only the active agent's tabs are candidates: the strip is scoped per
@@ -283,7 +226,7 @@ struct ChatTabStripView: View {
                 }
             }
             // The track spans the strip even while a close streak pins
-            // the tab width, so "+" stays put at the trailing end.
+            // the tab width.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .padding(Self.trackPadding)
             .frame(height: Self.trackHeight)
@@ -296,8 +239,8 @@ struct ChatTabStripView: View {
                 }
             }
             // Tabs never draw outside the track, even for a frame mid-resize.
-            // Only the track is clipped: clipping the whole row would cut
-            // the "+" button's glass shadow into a hard-edged rectangle.
+            // Only the track is clipped so its rounded boundary doesn't
+            // affect the separate overflow menu.
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             if !hiddenTabs.isEmpty {
@@ -305,8 +248,6 @@ struct ChatTabStripView: View {
                     .padding(.leading, 6)
             }
 
-            newTabButton
-                .padding(.leading, Self.edgeGap - Self.headerButtonPadding)
         }
     }
 
@@ -463,11 +404,6 @@ struct ChatTabStripView: View {
         menu.popUp(positioning: nil, at: NSPoint(x: origin.x - 8, y: origin.y - 16), in: nil)
     }
 
-    /// Same circle as the toolbar's other buttons (sidebar, rail toggle,
-    /// pin), so "+" reads as one of that row rather than part of the track.
-    private var newTabButton: some View {
-        HeaderActionButton(icon: "plus", help: "New Tab") { windowState.newTab() }
-    }
 }
 
 /// Capsule variant of the hover highlight for the wider overflow button.

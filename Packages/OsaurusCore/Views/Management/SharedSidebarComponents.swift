@@ -13,15 +13,12 @@ import SwiftUI
 enum SidebarStyle {
     // MARK: Layout
     static let width: CGFloat = 240
+    static let compactRailWidth: CGFloat = 58
     static let cornerRadius: CGFloat = 14
     static let rowCornerRadius: CGFloat = 8
     static let searchFieldCornerRadius: CGFloat = 8
     static let actionButtonSize: CGFloat = 24
     static let actionButtonCornerRadius: CGFloat = 5
-
-    // MARK: Glass Background
-    static let glassOpacityDark: Double = 0.82
-    static let glassOpacityLight: Double = 0.90
 
     // MARK: Accent Gradient
     static let accentGradientOpacityDark: Double = 0.06
@@ -50,6 +47,12 @@ struct SidebarContainer<Content: View>: View {
     /// Fixed width of the container. Defaults to the shared constant; callers
     /// that support a user-resizable rail pass a live width instead.
     let width: CGFloat
+    /// Shows the window-backed chrome through this container instead of the
+    /// independent tinted sidebar surface. Used by the chat navigation rail.
+    let usesWindowChromeBackground: Bool
+    /// Hides this container's decorative outline when its surface is composed
+    /// directly with the chat window chrome or canvas.
+    let showsBorder: Bool
 
     @ViewBuilder let content: () -> Content
     @Environment(\.theme) private var theme
@@ -58,11 +61,15 @@ struct SidebarContainer<Content: View>: View {
         attachedEdge: Edge? = nil,
         topPadding: CGFloat = 0,
         width: CGFloat = SidebarStyle.width,
+        usesWindowChromeBackground: Bool = false,
+        showsBorder: Bool = true,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.attachedEdge = attachedEdge
         self.topPadding = topPadding
         self.width = width
+        self.usesWindowChromeBackground = usesWindowChromeBackground
+        self.showsBorder = showsBorder
         self.content = content
     }
 
@@ -73,9 +80,19 @@ struct SidebarContainer<Content: View>: View {
         .padding(.top, topPadding)
         .frame(width: width, alignment: .top)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background { SidebarBackground() }
+        .background {
+            if usesWindowChromeBackground {
+                WindowChromeBackground()
+            } else {
+                SidebarBackground()
+            }
+        }
         .clipShape(containerShape)
-        .overlay(SidebarBorder(attachedEdge: attachedEdge))
+        .overlay {
+            if showsBorder {
+                SidebarBorder(attachedEdge: attachedEdge)
+            }
+        }
     }
 
     private var containerShape: UnevenRoundedRectangle {
@@ -114,29 +131,24 @@ struct SidebarContainer<Content: View>: View {
 
 // MARK: - Sidebar Background
 
-/// Glass-based background for sidebar with accent gradient (similar to ToastBackground).
+/// Translucent theme tint over the chat window's native glass, with an accent gradient.
 struct SidebarBackground: View {
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         ZStack {
-            // Layer 0: NSVisualEffectView-backed glass, only when the
-            // sidebar's own glass toggle is on. Outer container clips to
-            // the sidebar's rounded shape, so a plain rectangle is fine here.
-            if theme.glassSidebarEnabled {
-                ThemedGlassSurface(cornerRadius: SidebarStyle.cornerRadius)
-            }
-
-            // Layer 1: Semi-transparent card background. Lower opacity when
-            // the sidebar's own glass toggle is on so the behind-window
-            // material shows through.
-            theme.cardBackground.opacity(
-                theme.glassSidebarEnabled
-                    ? (theme.isDark ? SidebarStyle.glassOpacityDark : SidebarStyle.glassOpacityLight)
+            // ChatWindowRootView already supplies one behind-window material.
+            // Tint the sidebar palette over it instead of adding another
+            // independently blurred surface. Honor the theme's sidebar-glass
+            // toggle and use an opaque fill for Reduce Transparency.
+            theme.sidebarBackground.opacity(
+                theme.glassSidebarEnabled && !reduceTransparency
+                    ? theme.chatWindowGlassTintOpacity
                     : 1.0
             )
 
-            // Layer 2: Accent gradient for visual polish
+            // Accent gradient for visual polish.
             LinearGradient(
                 colors: [
                     theme.accentColor.opacity(
@@ -149,6 +161,17 @@ struct SidebarBackground: View {
                 endPoint: .bottomTrailing
             )
         }
+    }
+}
+
+/// Lets chat chrome reveal the one native window backdrop. The same theme
+/// fallback is used by the NSWindow when Reduce Transparency is enabled.
+struct WindowChromeBackground: View {
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        reduceTransparency ? theme.chatWindowChromeSolidFallback : Color.clear
     }
 }
 

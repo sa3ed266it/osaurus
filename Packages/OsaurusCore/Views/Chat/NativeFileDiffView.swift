@@ -106,7 +106,7 @@ final class NativeFileDiffView: NSView {
     private let copyButton = NSButton()
     private let collapseButton = NSButton()
     /// File-history controls: status badge ("Reverted"), View (opens the
-    /// File Changes inspector on this write) and Revert / Undo.
+    /// left File Changes panel on this write) and Revert / Undo.
     private let historyStack = NSStackView()
     private let historyBadge = NSTextField(labelWithString: "")
     private let viewButton = NSButton()

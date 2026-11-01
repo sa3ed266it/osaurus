@@ -2,7 +2,7 @@
 //  FileChangeSummaryStore.swift
 //  osaurus
 //
-//  Per-chat file change counts for the sidebar badge. One grouped query
+//  Per-chat file change counts for the Chats list badge. One grouped query
 //  for every chat, refreshed (coalesced) whenever the journal records or
 //  reverts a change.
 //
@@ -35,7 +35,7 @@ public final class FileChangeSummaryStore: ObservableObject {
         return summaries[sessionId.uuidString]
     }
 
-    /// Ask the window showing `sessionId` to open its File Changes inspector.
+    /// Ask the window showing `sessionId` to open its left File Changes panel.
     public static func requestPanel(sessionId: String, focusing setId: UUID? = nil) {
         var info: [String: Any] = ["sessionId": sessionId]
         if let setId { info["setId"] = setId }

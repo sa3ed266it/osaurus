@@ -3,7 +3,7 @@
 //  osaurus
 //
 //  Coachmark tour for the agent-first chat layout: spotlights the live UI
-//  (sidebar, tab strip, history and pin buttons, settings) with a short
+//  (navigation rail, tab strip, content panel, and settings) with a short
 //  callout per stop so users updating from the old layout learn that nothing was removed, only
 //  moved. Self-contained: its own once-per-user gate, its own auto-trigger
 //  when a chat window first appears, and a Help-menu replay. Independent of
@@ -24,10 +24,10 @@ import SwiftUI
 
 /// The UI elements the tour points at.
 public enum ChatTourAnchor: String, Sendable {
-    /// The Agents | Projects lens switcher at the top of the sidebar.
-    case sidebarLensBar
+    /// The active-agent avatar at the bottom of the compact navigation rail.
+    case agentSwitcher
     case tabStrip
-    case historyButton
+    case leftPanelButton
 }
 
 struct ChatTourStop: Identifiable {
@@ -44,7 +44,7 @@ extension ChatTourStop {
         [
             ChatTourStop(
                 id: "agents",
-                anchor: .sidebarLensBar,
+                anchor: .agentSwitcher,
                 title: L("Chats are now organized by agent"),
                 body: L(
                     "Choose an agent to continue your conversation.\n\nYou can start a new chat with that agent anytime."
@@ -60,10 +60,10 @@ extension ChatTourStop {
             ),
             ChatTourStop(
                 id: "history",
-                anchor: .historyButton,
-                title: L("Past chats and file changes"),
+                anchor: .leftPanelButton,
+                title: L("Chats and file changes are together"),
                 body: L(
-                    "Open the inspector to search past chats with this agent and review, or undo, every file a chat changed."
+                    "Open the left panel to search past chats with this agent or review and undo files changed by the current chat."
                 )
             ),
         ]
@@ -217,10 +217,11 @@ public final class ChatLayoutTour: ObservableObject {
         }
         manager.showWindow(id: targetId)
         guard let state = manager.windowState(id: targetId) else { return }
-        // Stop 1 points at the sidebar; make sure it is open. The project
-        // page hides the tabs and trims the menu, so leave it too.
+        // Stop 1 points at the navigation rail; make sure Chats is selected
+        // in its neighboring panel. The project page hides the tabs, so leave
+        // it too.
         state.openProjectId = nil
-        withAnimation(state.theme.animationQuick()) { state.showSidebar = true }
+        withAnimation(state.theme.animationQuick()) { state.showLeftPanel(.chats) }
         windowId = targetId
         stepIndex = 0
         presentOverlay(for: targetId)

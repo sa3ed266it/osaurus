@@ -172,7 +172,7 @@ private extension osaurusApp {
         CommandGroup(after: .sidebar) {
             Button {
                 Task { @MainActor in
-                    ChatWindowManager.shared.toggleSidebarInFocusedWindow()
+                    ChatWindowManager.shared.toggleLeftPanelInFocusedWindow()
                 }
             } label: {
                 Text(verbatim: LCached("Toggle Sidebar"))

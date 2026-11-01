@@ -2,12 +2,9 @@
 //  ChatHistoryPane.swift
 //  osaurus
 //
-//  History pane of the chat inspector: the past chats of the agent behind
-//  the tab on screen, with search, the Filter popover (origin, project,
-//  workspace, plugin, capability, archived), New Chat and Import. Like the
-//  File Changes pane beside it, it is scoped by the current tab — so it
-//  needs no agent picker; the header names the scope instead. Tapping a
-//  row loads that conversation in the current tab; the rail stays up.
+//  Shared History surface for the chat content panel: search, filters,
+//  New Chat, Import and per-conversation actions. A host can supply the
+//  active local/workspace tab scope or retain the agent-wide list.
 //
 
 import AppKit
@@ -79,7 +76,7 @@ struct ChatHistoryWindowActions {
     }
 }
 
-/// History pane content. Row actions raise their own alerts (delete
+/// History content. Row actions raise their own alerts (delete
 /// confirmation, export chooser + progress, import guide) through the
 /// window's `ThemedAlertScope`, so they present over the whole window.
 struct ChatHistoryPaneView: View {
@@ -87,6 +84,9 @@ struct ChatHistoryPaneView: View {
     let scope: ThemedAlertScope
     let onSelect: (ChatSessionData) -> Void
     let onOpenInNewTab: (ChatSessionData) -> Void
+    /// Optional navigation scope for a panel tied to the active tab. Hosts
+    /// that omit it retain the existing agent-wide list behavior.
+    var sessionScope: ChatTabScope? = nil
 
     @Environment(\.theme) private var theme
     @ObservedObject private var agentManager = AgentManager.shared
@@ -118,8 +118,22 @@ struct ChatHistoryPaneView: View {
 
     /// The current tab's agent's chats (untagged ones count as the Default
     /// agent), both archived states; `ChatHistoryList` applies the lenses.
+    /// When a compact flyout supplies an active scope, workspace chats are
+    /// keyed by the remote agent address rather than the local host agent.
     private var visibleSessions: [ChatSessionData] {
-        sessionsManager.sessions.filter { ($0.agentId ?? Agent.defaultId) == windowState.agentId }
+        if let sessionScope {
+            return sessionsManager.sessions.filter { session in
+                switch sessionScope {
+                case .local(let scopedAgentId):
+                    return !session.isWorkspaceAgentChat
+                        && (session.agentId ?? Agent.defaultId) == scopedAgentId
+                case .workspace(let address, let workspaceId):
+                    guard let context = session.workspace, !context.isServedForTeammate else { return false }
+                    return context.agentAddress == address.lowercased() && context.workspaceId == workspaceId
+                }
+            }
+        }
+        return sessionsManager.sessions.filter { ($0.agentId ?? Agent.defaultId) == windowState.agentId }
     }
 
     private var agent: Agent? { agentManager.agent(for: windowState.agentId) }
@@ -185,6 +199,9 @@ struct ChatHistoryPaneView: View {
         .onChange(of: windowState.agentId) { _, _ in
             clearFilters()
         }
+        .onChange(of: sessionScope) { _, _ in
+            if sessionScope != nil { clearFilters() }
+        }
         // Unarchiving the last archived chat: make sure the lens does not
         // stay stuck on an empty, now-pointless state.
         .onChange(of: visibleSessions.contains(where: \.archived)) { _, hasArchived in
@@ -197,17 +214,22 @@ struct ChatHistoryPaneView: View {
     /// Avatar + agent name + "· N chats": a static indicator of what the
     /// list is scoped to, not a control (pick agents in the sidebar).
     private var scopeLabel: some View {
-        HStack(spacing: 6) {
+        let identity = windowState.effectiveChatIdentity
+        let usesActiveIdentity = sessionScope != nil
+        let name = usesActiveIdentity ? identity.name : (agent?.displayName ?? windowState.cachedAgentDisplayName)
+        return HStack(spacing: 6) {
             AgentAvatarView(
-                mascotId: agent?.avatar,
-                name: agent?.displayName ?? "",
-                tint: agentColorFor(agent?.name ?? ""),
+                mascotId: usesActiveIdentity ? identity.mascotId : agent?.avatar,
+                name: name,
+                tint: usesActiveIdentity ? theme.accentColor : agentColorFor(agent?.name ?? ""),
                 diameter: 16,
-                customImageURL: agent?.customAvatarURL,
+                customImageURL: usesActiveIdentity
+                    ? identity.customAvatarPath.map(URL.init(fileURLWithPath:))
+                    : agent?.customAvatarURL,
                 monogramFontSize: 7,
                 borderWidth: 0
             )
-            Text(verbatim: agent?.displayName ?? windowState.cachedAgentDisplayName)
+            Text(verbatim: name)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(theme.primaryText)
                 .lineLimit(1)

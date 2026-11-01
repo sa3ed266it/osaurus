@@ -146,11 +146,24 @@ enum OsaurusRouter {
         return "\(sign)\(groupedThousands(credits))"
     }
 
-    /// Compact balance for tight chrome like the composer chip: full grouped
-    /// number below 10,000 credits, then abbreviated ("212.1K credits",
-    /// "1.25M credits") so large balances never truncate. Sub-credit residue
-    /// is dropped.
+    /// Compact balance for the workspace-pool composer chip: full grouped
+    /// numbers below 10,000 credits, then abbreviated. Sub-credit residue is
+    /// dropped.
     static func formatMicroAsCreditsCompact(_ rawValue: String) -> String {
+        formatMicroAsCreditsCompact(rawValue, abbreviatingBelow: 10_000, twoDecimalKBelow: 0)
+    }
+
+    /// Compact balance for the narrow Credits rail indicator. It keeps more
+    /// precision between 1,000 and 10,000 credits than the workspace chip.
+    static func formatMicroAsCreditsCompactForRail(_ rawValue: String) -> String {
+        formatMicroAsCreditsCompact(rawValue, abbreviatingBelow: 1_000, twoDecimalKBelow: 10_000)
+    }
+
+    private static func formatMicroAsCreditsCompact(
+        _ rawValue: String,
+        abbreviatingBelow threshold: Int64,
+        twoDecimalKBelow precisionThreshold: Int64
+    ) -> String {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let isNegative = trimmed.hasPrefix("-")
         let unsigned = String(trimmed.drop { $0 == "-" || $0 == "+" })
@@ -161,7 +174,7 @@ enum OsaurusRouter {
         if credits == 0 {
             return "\(sign)<1 credit"
         }
-        if credits < 10_000 {
+        if credits < threshold {
             let unit = credits == 1 ? "credit" : "credits"
             return "\(sign)\(groupedThousands(credits)) \(unit)"
         }
@@ -170,7 +183,9 @@ enum OsaurusRouter {
         let useMillions = credits >= 999_950
         let scaled = useMillions ? Double(credits) / 1_000_000 : Double(credits) / 1_000
         let suffix = useMillions ? "M" : "K"
-        var figure = String(format: useMillions ? "%.2f" : "%.1f", scaled)
+        let useTwoDecimals = useMillions || (precisionThreshold > 0 && credits < precisionThreshold)
+        let format = useTwoDecimals ? "%.2f" : "%.1f"
+        var figure = String(format: format, scaled)
         while figure.contains("."), figure.hasSuffix("0") {
             figure.removeLast()
         }

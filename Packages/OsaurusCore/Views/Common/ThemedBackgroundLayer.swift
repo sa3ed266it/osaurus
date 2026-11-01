@@ -3,7 +3,10 @@
 //  osaurus
 //
 //  Shared background layer used by chat windows.
-//  Renders solid, gradient, or image backgrounds from the active theme config.
+//  Default built-in solid themes tint native window glass. Explicit custom
+//  backgrounds render as configured and may cover that material. Reduce
+//  Transparency disables native translucency and supplies a solid palette
+//  fallback beneath any explicitly configured custom background.
 //
 
 import SwiftUI
@@ -11,18 +14,36 @@ import SwiftUI
 struct ThemedBackgroundLayer: View {
     let cachedBackgroundImage: NSImage?
 
-    @Environment(\.theme) private var theme
+    init(cachedBackgroundImage: NSImage?) {
+        self.cachedBackgroundImage = cachedBackgroundImage
+    }
 
-    /// Fills edge to edge. The opaque chat panel is masked by AppKit at the
-    /// system window radius, so this layer must not clip itself to a guessed
-    /// radius: macOS 26 and 27 use different corners, and a hardcoded 24pt
-    /// left the content clipped tighter than the frame on 27.
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    /// Tints the single window-backed material for built-in themes. ChatView
+    /// clips the canvas surface; AppKit supplies the system-specific outer
+    /// window mask.
     var body: some View {
         backgroundLayer
     }
 
     @ViewBuilder
     private var backgroundLayer: some View {
+        if preservesConfiguredBackground {
+            configuredBackgroundLayer
+        } else if reduceTransparency {
+            theme.chatWindowSolidFallback
+        } else {
+            // Keep the selected theme color as a light tint over the native
+            // material. The stored windowBackingOpacity is mapped to a
+            // glass-specific opacity instead of an almost-opaque fill.
+            theme.primaryBackground.opacity(theme.chatWindowGlassTintOpacity)
+        }
+    }
+
+    @ViewBuilder
+    private var configuredBackgroundLayer: some View {
         if let customTheme = theme.customThemeConfig {
             switch customTheme.background.type {
             case .solid:
@@ -58,6 +79,23 @@ struct ThemedBackgroundLayer: View {
             }
         } else {
             theme.primaryBackground
+        }
+    }
+
+    /// The built-in Dark and Light presets use `.solid` as their default
+    /// palette, which now acts as a tint over native glass. User custom themes,
+    /// explicitly selected solid colors, gradients, and images retain their
+    /// configured background behavior.
+    private var preservesConfiguredBackground: Bool {
+        guard let customTheme = theme.customThemeConfig else { return false }
+        if !customTheme.isBuiltIn || customTheme.background.solidColor != nil {
+            return true
+        }
+        switch customTheme.background.type {
+        case .solid:
+            return false
+        case .gradient, .image:
+            return true
         }
     }
 

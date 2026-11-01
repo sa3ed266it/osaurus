@@ -58,8 +58,7 @@ struct OsaurusRouterCreditsFormattingTests {
         #expect(OsaurusRouter.formatMicroAsCreditsValue("-5000000") == "-50,000")
     }
 
-    /// The composer chip abbreviates from 10,000 credits up so six-figure
-    /// balances never truncate.
+    /// The workspace pool chip retains its existing 10,000-credit threshold.
     @Test func compactBalanceAbbreviatesLargeAmounts() {
         #expect(OsaurusRouter.formatMicroAsCreditsCompact("999900") == "9,999 credits")
         #expect(OsaurusRouter.formatMicroAsCreditsCompact("1000000") == "10K credits")
@@ -73,6 +72,13 @@ struct OsaurusRouterCreditsFormattingTests {
         #expect(OsaurusRouter.formatMicroAsCreditsCompact("50") == "<1 credit")
         #expect(OsaurusRouter.formatMicroAsCreditsCompact("0") == "0 credits")
         #expect(OsaurusRouter.formatMicroAsCreditsCompact("-21208579") == "-212.1K credits")
+    }
+
+    @Test func railBalanceUsesCompactPrecisionWithoutChangingWorkspaceFormatting() {
+        #expect(OsaurusRouter.formatMicroAsCreditsCompactForRail("2250000") == "22.5K credits")
+        #expect(OsaurusRouter.formatMicroAsCreditsCompactForRail("825000") == "8.25K credits")
+        #expect(OsaurusRouter.formatMicroAsCreditsCompactForRail("54000") == "540 credits")
+        #expect(OsaurusRouter.formatMicroAsCreditsCompactForRail("0") == "0 credits")
     }
 
     /// Cloud media costs only exist as USD doubles; they convert through

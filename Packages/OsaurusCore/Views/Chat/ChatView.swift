@@ -9250,22 +9250,15 @@ struct ChatView: View {
 
     @State private var focusTrigger: Int = 0
     @State private var isPinnedToBottom: Bool = true
-    /// User-adjustable width of the History sidebar, persisted across launches
-    /// so a chosen width sticks. Clamped to `sidebarWidthRange` on read so a
-    /// stale out-of-bounds value can never wedge the layout.
-    @AppStorage("chatSidebarWidth") private var storedSidebarWidth: Double = 240
-    /// Transient width while an edge drag is in flight. Kept in view state so
-    /// the resize tracks the cursor at 60fps without hitting UserDefaults on
-    /// every frame; the final value is committed to `storedSidebarWidth` on
-    /// drag end. `nil` means no drag is active.
-    @State private var liveSidebarWidth: Double?
-    /// User-adjustable width of the right-hand inspector, persisted like the
-    /// sidebar's and clamped to `inspectorWidthRange` on read.
-    @AppStorage("chatInspectorWidth") private var storedInspectorWidth: Double = ChatView.defaultInspectorWidth
-    /// Transient inspector width while its edge drag is in flight.
-    @State private var liveInspectorWidth: Double?
+    /// One transient navigator popover per chat view/window.
+    @State private var activeNavigatorFlyout: ChatSessionSidebar.NavigatorFlyout?
+    /// Width of the project-specific settings panel on project detail pages.
+    /// Keep the existing preference key so customized local widths survive.
+    @AppStorage("chatInspectorWidth") private var storedProjectSettingsWidth: Double = ChatView.defaultProjectSettingsWidth
+    /// Transient project-settings width while its edge drag is in flight.
+    @State private var liveProjectSettingsWidth: Double?
     /// Project whose detail page is shown in the content area (opened from
-    /// the sidebar's Projects tab). nil shows the normal chat surface.
+    /// the Projects flyout). nil shows the normal chat surface.
     /// Observed so project renames/edits re-render the open detail page.
     @ObservedObject private var projectManager = ProjectManager.shared
     @State private var scrollToBottomTrigger: Int = 0
@@ -9319,7 +9312,7 @@ struct ChatView: View {
     @State private var deleteAssistantMessageWarning: String = ""
     @StateObject private var deleteMessageOptions = DeleteMessageOptions()
     /// Presents the credits top-up sheet, opened from the out-of-credits modal
-    /// or the composer's credits chip.
+    /// or the navigation-rail Credits indicator.
     @State private var showTopUpSheet: Bool = false
     /// Observed so the post-top-up retry watcher reacts to balance changes; the
     /// balance auto-refreshes on app activation when returning from Stripe.
@@ -9940,6 +9933,13 @@ struct ChatView: View {
     var body: some View {
         let _ = ChatPerfTrace.shared.count("body.ChatView")
         chatModeContent
+            .onChange(of: windowState.leftPanelMode) { _, _ in
+                activeNavigatorFlyout = nil
+            }
+            .onChange(of: projectManager.pendingRevealProjectsTab) { _, reveal in
+                guard reveal else { return }
+                activeNavigatorFlyout = .projects
+            }
             .themedAlert(
                 L("Do you want Osaurus to auto speak every reply in this chat?"),
                 isPresented: $showAutoSpeakPrompt,
@@ -10071,96 +10071,62 @@ struct ChatView: View {
         .animation(theme.springAnimation(), value: current?.id)
     }
 
-    /// Allowed range for the resizable sidebar. The floor keeps the header
-    /// controls usable; the ceiling stops the sidebar from crowding out the
-    /// chat on narrow windows.
-    private static let sidebarWidthRange: ClosedRange<Double> = 260...460
+    /// The left navigation rail is fixed and permanently visible.
+    private static let sidebarRailWidth = SidebarStyle.compactRailWidth
+    /// Chats and File Changes share one fixed-width content panel.
+    static let leftContentPanelWidth: CGFloat = 300
 
-    /// Clamp a raw width to the allowed range.
-    private func clampSidebarWidth(_ raw: Double) -> Double {
-        min(max(raw, Self.sidebarWidthRange.lowerBound), Self.sidebarWidthRange.upperBound)
+    /// Allowed range for the project-specific settings panel.
+    static let projectSettingsWidthRange: ClosedRange<Double> = 300...520
+    /// Design width for Project Settings before the user resizes it.
+    static let defaultProjectSettingsWidth: Double = 380
+    /// Minimum width kept for the main chat or project content area.
+    static let minimumCanvasWidth: CGFloat = 440
+
+    /// Clamp a raw Project Settings width to its supported range.
+    static func clampProjectSettingsWidth(_ raw: Double) -> Double {
+        min(max(raw, projectSettingsWidthRange.lowerBound), projectSettingsWidthRange.upperBound)
     }
 
-    /// Effective sidebar width: the live drag value while resizing, otherwise
-    /// the persisted width. Always clamped.
-    private var clampedSidebarWidth: CGFloat {
-        CGFloat(clampSidebarWidth(liveSidebarWidth ?? storedSidebarWidth))
+    /// Effective Project Settings width: the live drag value while resizing,
+    /// otherwise the persisted width. Always clamped.
+    private var clampedProjectSettingsWidth: CGFloat {
+        CGFloat(Self.clampProjectSettingsWidth(liveProjectSettingsWidth ?? storedProjectSettingsWidth))
     }
 
-    /// Draggable divider on the sidebar's trailing edge (shared control with
-    /// the inspector's leading edge).
-    private var sidebarResizeHandle: some View {
-        ColumnResizeHandle(
-            edge: .trailing,
-            range: Self.sidebarWidthRange,
-            storedWidth: $storedSidebarWidth,
-            liveWidth: $liveSidebarWidth
-        )
-    }
-
-    /// Allowed range for the resizable inspector. Same floor as the
-    /// inspector's squeeze limit; the ceiling keeps the chat column
-    /// readable.
-    static let inspectorWidthRange: ClosedRange<Double> = 300...520
-    /// Design width the inspector opens at before the user resizes it.
-    static let defaultInspectorWidth: Double = 380
-    /// Chat column kept readable beside the inspector.
-    private static let chatColumnMinWidthWithPanel: CGFloat = 440
-
-    /// Clamp a raw inspector width to the allowed range.
-    static func clampInspectorWidth(_ raw: Double) -> Double {
-        min(max(raw, inspectorWidthRange.lowerBound), inspectorWidthRange.upperBound)
-    }
-
-    /// Effective user-chosen inspector width: the live drag value while
-    /// resizing, otherwise the persisted width. Always clamped.
-    private var clampedInspectorWidth: CGFloat {
-        CGFloat(Self.clampInspectorWidth(liveInspectorWidth ?? storedInspectorWidth))
-    }
-
-    /// Draggable divider on the inspector's leading edge.
-    private var inspectorResizeHandle: some View {
+    /// Draggable divider on Project Settings' leading edge.
+    private var projectSettingsResizeHandle: some View {
         ColumnResizeHandle(
             edge: .leading,
-            range: Self.inspectorWidthRange,
-            storedWidth: $storedInspectorWidth,
-            liveWidth: $liveInspectorWidth
+            range: Self.projectSettingsWidthRange,
+            storedWidth: $storedProjectSettingsWidth,
+            liveWidth: $liveProjectSettingsWidth
         )
     }
 
-    /// The inspector pane on screen, if any. Hidden on the project page,
-    /// which has no chat to inspect (the toolbar hides its toggle there
-    /// too); the requested pane stays remembered for when the chat returns.
-    static func visibleInspectorPane(
-        requested: ChatInspectorPane?,
-        isProjectPageOpen: Bool
-    ) -> ChatInspectorPane? {
-        guard let requested, !isProjectPageOpen else { return nil }
-        return requested
+    /// Use an overlay when docking the left panel would leave less than the
+    /// minimum canvas width. Project Settings needs its own minimum when open.
+    static func leftPanelUsesOverlay(
+        windowWidth: CGFloat,
+        isOpen: Bool,
+        projectSettingsOpen: Bool
+    ) -> Bool {
+        guard isOpen else { return false }
+        let rightPanelMinimum = projectSettingsOpen ? CGFloat(projectSettingsWidthRange.lowerBound) : 0
+        let minimumDockedWidth = sidebarRailWidth + leftContentPanelWidth + minimumCanvasWidth + rightPanelMinimum
+        return windowWidth < minimumDockedWidth
     }
 
-    private var visibleInspectorPane: ChatInspectorPane? {
-        Self.visibleInspectorPane(
-            requested: windowState.effectiveInspectorPane,
-            isProjectPageOpen: windowState.openProjectId != nil
-        )
-    }
-
-    /// Whether the sidebar steps aside (not persisted) for the inspector:
-    /// both only stay up once the window can hold the sidebar at its
-    /// current width, a readable chat column and the inspector at its floor.
-    static func sidebarStepsAside(windowWidth: CGFloat, sidebarWidth: CGFloat, inspectorOpen: Bool) -> Bool {
-        inspectorOpen
-            && windowWidth < sidebarWidth + chatColumnMinWidthWithPanel + CGFloat(inspectorWidthRange.lowerBound)
-    }
-
-    /// Inspector width for a window of `totalWidth`: the user's chosen width
-    /// when it fits, otherwise squeezed down to its floor before the chat
-    /// column gives.
-    static func changesPanelWidth(totalWidth: CGFloat, sidebarWidth: CGFloat, preferredWidth: CGFloat) -> CGFloat {
-        let available = totalWidth - sidebarWidth - chatColumnMinWidthWithPanel
-        let preferred = CGFloat(clampInspectorWidth(Double(preferredWidth)))
-        return min(preferred, max(CGFloat(inspectorWidthRange.lowerBound), available))
+    /// Project Settings width, leaving the main content area readable where
+    /// the screen permits it.
+    static func projectSettingsPanelWidth(
+        totalWidth: CGFloat,
+        leadingNavigationWidth: CGFloat,
+        preferredWidth: CGFloat
+    ) -> CGFloat {
+        let available = totalWidth - leadingNavigationWidth - minimumCanvasWidth
+        let preferred = CGFloat(clampProjectSettingsWidth(Double(preferredWidth)))
+        return min(preferred, max(CGFloat(projectSettingsWidthRange.lowerBound), available))
     }
 
     /// First line of the user's request that produced the assistant turn
@@ -10175,15 +10141,14 @@ struct ChatView: View {
         return trimmed.count > 120 ? String(trimmed.prefix(120)) + "…" : trimmed
     }
 
-    /// The left rail (Agents | Projects), with every window-level handoff
-    /// it needs. Kept out of `chatModeContent` so the layout expression
-    /// stays type-checkable.
-    private func navigatorRail(width sidebarWidth: CGFloat) -> some View {
+    /// The permanent left rail, with every window-level handoff it needs.
+    private func navigatorRail() -> some View {
         ChatSessionSidebar(
             sessions: windowState.filteredSessions,
             agentId: windowState.agentId,
-            keepsProjectsLens: windowState.enteredChatFromProjectPage,
-            width: sidebarWidth,
+            windowState: windowState,
+            width: Self.sidebarRailWidth,
+            activeFlyout: $activeNavigatorFlyout,
             onSelect: { data in
                 windowState.openProjectId = nil
                 windowState.enteredChatFromProjectPage = false
@@ -10245,423 +10210,439 @@ struct ChatView: View {
             // call the handler directly.
             onSelectDiscoveredAgent: { agent in
                 selectDiscoveredAgent(agent)
-            }
+            },
+            creditsIndicatorHidden: windowState.remoteAgentConnectionPhase == .connecting
+                || isRemoteAgentChrome
+                || workspacePoolLabel != nil
+                || composerLock != nil,
+            isRouterBilledSession: observedSession.isOsaurusRouterSession,
+            sessionSpendMicro: observedSession.sessionRouterSpendMicro,
+            sessionCachedInputLabel: {
+                let stats = observedSession.sessionRouterCacheStats
+                return OsaurusRouter.formatCachedInputLabel(
+                    cachedTokens: stats.cachedInputTokens,
+                    inputTokens: stats.inputTokens
+                )
+            }(),
+            onAddCredits: { showTopUpSheet = true }
         )
     }
 
-    /// Chat mode content - the original ChatView implementation
+    /// Chat mode content: permanent rail, optional left content panel, canvas,
+    /// and Project Settings only while a project detail page is open.
     @ViewBuilder
     private var chatModeContent: some View {
         GeometryReader { proxy in
-            let inspectorPane = visibleInspectorPane
             let projectInspectorVisible = windowState.isProjectPageVisible && windowState.showProjectInspector
-            let inspectorVisible = inspectorPane != nil || projectInspectorVisible
-            let sidebarAutoHidden =
-                windowState.showSidebar
-                && Self.sidebarStepsAside(
-                    windowWidth: proxy.size.width,
-                    sidebarWidth: clampedSidebarWidth,
-                    inspectorOpen: inspectorVisible)
-            let sidebarVisible = windowState.showSidebar && !sidebarAutoHidden
-            let sidebarWidth: CGFloat = sidebarVisible ? clampedSidebarWidth : 0
-            let inspectorWidth: CGFloat =
-                inspectorVisible
-                ? Self.changesPanelWidth(
+            let leftPanelOpen = windowState.isLeftPanelOpen
+            let leftPanelOverlays = Self.leftPanelUsesOverlay(
+                windowWidth: proxy.size.width,
+                isOpen: leftPanelOpen,
+                projectSettingsOpen: projectInspectorVisible
+            )
+            let dockedLeftPanelWidth: CGFloat = leftPanelOpen && !leftPanelOverlays ? Self.leftContentPanelWidth : 0
+            let leadingNavigationWidth = Self.sidebarRailWidth + dockedLeftPanelWidth
+            let projectSettingsWidth = projectInspectorVisible
+                ? Self.projectSettingsPanelWidth(
                     totalWidth: proxy.size.width,
-                    sidebarWidth: sidebarWidth,
-                    preferredWidth: clampedInspectorWidth) : 0
-            let chatWidth = proxy.size.width - sidebarWidth - inspectorWidth
+                    leadingNavigationWidth: leadingNavigationWidth,
+                    preferredWidth: clampedProjectSettingsWidth
+                ) : 0
+            let contentAreaWidth = max(0, proxy.size.width - Self.sidebarRailWidth - projectSettingsWidth)
+            let chatWidth = max(0, contentAreaWidth - dockedLeftPanelWidth)
             let effectiveContentWidth = min(chatWidth, 1100)
+            let titlebarContentInset = windowState.isFullScreen ? 0 : windowState.titlebarContentInset
+            let canvasTopLeadingRadius: CGFloat = (windowState.isFullScreen || titlebarContentInset > 0) ? 11 : 0
+            let chatCanvasShape = UnevenRoundedRectangle(
+                topLeadingRadius: canvasTopLeadingRadius,
+                bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: 0,
+                style: .continuous
+            )
 
             HStack(alignment: .top, spacing: 0) {
-                // Sidebar
-                VStack(alignment: .leading, spacing: 0) {
-                    if sidebarVisible {
-                        navigatorRail(width: sidebarWidth)
-                    }
-                }
-                .frame(width: sidebarWidth, alignment: .top)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .clipped()
-                .overlay(alignment: .trailing) {
-                    if sidebarVisible {
-                        sidebarResizeHandle
-                    }
-                }
-                .zIndex(1)
+                navigatorRail()
+                    .frame(width: Self.sidebarRailWidth, alignment: .top)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .clipped()
+                    .zIndex(1)
 
-                // Main chat area
-                ZStack {
-                    // Background
-                    chatBackground
+                // The 58pt rail reaches beneath the transparent titlebar;
+                // the content panel and canvas start at AppKit's unobscured
+                // content boundary.
+                VStack(spacing: 0) {
+                    Color.clear
+                        .frame(height: titlebarContentInset)
+                        .allowsHitTesting(false)
 
-                    // Main content — centered with a max readable width
-                    VStack(spacing: 0) {
-                        // Header
-                        chatHeader
+                    GeometryReader { contentProxy in
+                        let canvasWidth = max(0, contentProxy.size.width - dockedLeftPanelWidth)
 
-                        // Content area (show immediately, model discovery is async)
-                        if session.hasAnyModel || session.isDiscoveringModels || session.isHarnessAgentActive {
-                            if !session.hasVisibleThreadMessages {
-                                if session.isHydratingTranscript {
-                                    // A hibernated tab being woken: its
-                                    // transcript is on its way, so don't
-                                    // flash the new-chat greeting.
-                                    ProgressView()
-                                        .controlSize(.small)
-                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        ZStack(alignment: .leading) {
+                            // Main chat / project canvas. In narrow windows
+                            // the content panel overlays this surface without
+                            // reducing its layout width.
+                            ZStack {
+                        // Background
+                        chatBackground
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipShape(chatCanvasShape)
+
+                        // Main content — centered with a max readable width
+                        VStack(spacing: 0) {
+                            // Header
+                            chatHeader
+
+                            // Content area (show immediately, model discovery is async)
+                            if session.hasAnyModel || session.isDiscoveringModels || session.isHarnessAgentActive {
+                                if !session.hasVisibleThreadMessages {
+                                    if session.isHydratingTranscript {
+                                        // A hibernated tab being woken: its
+                                        // transcript is on its way, so don't
+                                        // flash the new-chat greeting.
+                                        ProgressView()
+                                            .controlSize(.small)
+                                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    } else {
+                                        emptyStateView
+                                    }
                                 } else {
-                                    emptyStateView
+                                    // Message thread. While a prompt
+                                    // overlay is mounted, blur the thread
+                                    // and stop hit-testing so the prompt
+                                    // visibly takes the foreground without
+                                    // letting taps leak through.
+                                    messageThread(effectiveContentWidth)
+                                        .blur(radius: promptOverlayObscuresConversation ? 1.5 : 0)
+                                        .allowsHitTesting(!isPromptOverlayActive)
+                                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                                        .animation(theme.springAnimation(), value: promptOverlayObscuresConversation)
                                 }
-                            } else {
-                                // Message thread. While a prompt
-                                // overlay is mounted, blur the thread
-                                // and stop hit-testing so the prompt
-                                // visibly takes the foreground without
-                                // letting taps leak through.
-                                messageThread(effectiveContentWidth)
-                                    .blur(radius: promptOverlayObscuresConversation ? 1.5 : 0)
-                                    .allowsHitTesting(!isPromptOverlayActive)
-                                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-                                    .animation(theme.springAnimation(), value: promptOverlayObscuresConversation)
-                            }
 
-                            // Mode 2 connection status (connecting / error +
-                            // Retry) shown directly above the composer so the
-                            // gated send has a visible explanation.
-                            // Every notice above the composer shares the input
-                            // card's 20 pt horizontal inset (see
-                            // `FloatingInputCard.inputCard`) so they read as
-                            // one stacked group with the same left/right edges.
-                            remoteAgentConnectionNotice
-                                .padding(.horizontal, Self.composerHorizontalInset)
-                                .frame(maxWidth: 1100)
-                                .frame(maxWidth: .infinity)
-                                .animation(theme.springAnimation(), value: windowState.remoteAgentConnectionPhase)
+                                // Mode 2 connection status (connecting / error +
+                                // Retry) shown directly above the composer so the
+                                // gated send has a visible explanation.
+                                // Every notice above the composer shares the input
+                                // card's 20 pt horizontal inset (see
+                                // `FloatingInputCard.inputCard`) so they read as
+                                // one stacked group with the same left/right edges.
+                                remoteAgentConnectionNotice
+                                    .padding(.horizontal, Self.composerHorizontalInset)
+                                    .frame(maxWidth: 1100)
+                                    .frame(maxWidth: .infinity)
+                                    .animation(theme.springAnimation(), value: windowState.remoteAgentConnectionPhase)
 
-                            // Workspace team agent offline / unpaired /
-                            // connecting, or a read-only teammate
-                            // conversation: explains the locked composer and
-                            // offers Retry / Connect.
-                            if observedSession.workspaceContext?.isServedForTeammate == false {
-                                Text("The agent owner can review this conversation and its history.", bundle: .module)
+                                // Workspace team agent offline / unpaired /
+                                // connecting, or a read-only teammate
+                                // conversation: explains the locked composer and
+                                // offers Retry / Connect.
+                                if observedSession.workspaceContext?.isServedForTeammate == false {
+                                    Text(
+                                        "The agent owner can review this conversation and its history.",
+                                        bundle: .module
+                                    )
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal, Self.composerHorizontalInset)
-                            }
+                                }
 
-                            ChatPersistenceNotice(sessionId: observedSession.sessionId)
-                                .padding(.horizontal, Self.composerHorizontalInset)
-                                .frame(maxWidth: 1100)
-                                .frame(maxWidth: .infinity)
-
-                            // Spaced from the notice above (the repair banner),
-                            // and from the window edge when there is no input
-                            // card below it to do that.
-                            if composerLock != nil {
-                                composerLockNotice
+                                ChatPersistenceNotice(sessionId: observedSession.sessionId)
                                     .padding(.horizontal, Self.composerHorizontalInset)
-                                    .padding(.top, 8)
-                                    .padding(.bottom, isReadOnlyConversation ? 12 : 0)
                                     .frame(maxWidth: 1100)
                                     .frame(maxWidth: .infinity)
-                                    .animation(theme.springAnimation(), value: composerLock)
-                            }
 
-                            // Run-liveness notice (slow / stalled) so a run
-                            // with no visible progress reads as a knowable
-                            // state with a recovery action, not a hang.
-                            runProgressNotice
-                                .padding(.horizontal, Self.composerHorizontalInset)
-                                .frame(maxWidth: 1100)
-                                .frame(maxWidth: .infinity)
-                                .animation(
-                                    theme.springAnimation(),
-                                    value: observedSession.runProgress.state
-                                )
-
-                            // Follow-up suggestions render as a thread row
-                            // beneath the assistant message (see
-                            // `insertFollowUpSuggestionsIfNeeded`), not here.
-
-                            // Floating input card. Dimmed and
-                            // hit-test-disabled while a prompt overlay
-                            // is mounted so the prompt's embedded
-                            // input is the obvious place to type, and
-                            // accidental sends here can't race the
-                            // prompt resolution.
-                            // Hidden on a read-only conversation (a teammate's, or one
-                            // from the paired iPhone): nothing can be sent there, and the
-                            // notice above says where it continues.
-                            if !isReadOnlyConversation {
-                                if let error = observedSession.turnParametersError {
-                                    Text(error).font(.caption).foregroundStyle(.red)
+                                // Spaced from the notice above (the repair banner),
+                                // and from the window edge when there is no input
+                                // card below it to do that.
+                                if composerLock != nil {
+                                    composerLockNotice
                                         .padding(.horizontal, Self.composerHorizontalInset)
+                                        .padding(.top, 8)
+                                        .padding(.bottom, isReadOnlyConversation ? 12 : 0)
+                                        .frame(maxWidth: 1100)
+                                        .frame(maxWidth: .infinity)
+                                        .animation(theme.springAnimation(), value: composerLock)
                                 }
-                                FloatingInputCard(
-                                    text: $observedSession.input,
-                                    selectedModel: $observedSession.selectedModel,
-                                    pendingAttachments: $observedSession.pendingAttachments,
-                                    isContinuousVoiceMode: $observedSession.isContinuousVoiceMode,
-                                    voiceInputState: $observedSession.voiceInputState,
-                                    showVoiceOverlay: $observedSession.showVoiceOverlay,
-                                    pickerItems: filteredPickerItems,
-                                    activeModelOptions: $observedSession.activeModelOptions,
-                                    turnOverrides: $observedSession.nextTurnOverrides,
-                                    isStreaming: observedSession.isSendActiveForComposer,
-                                    // Hide Stop ONLY while the redaction review
-                                    // sheet is actually on screen (the sheet owns
-                                    // its own Cancel and the streaming Task is
-                                    // suspended in its continuation). Crucially
-                                    // this is NOT gated on the broader
-                                    // "before first token" window, so Stop stays
-                                    // available during model load / prefill — the
-                                    // long pause a big model spends loading from
-                                    // disk while the typing-indicator shimmer is up.
-                                    isPrivacyReviewSheetVisible: pendingRedactionReview != nil,
-                                    supportsImages: observedSession.selectedModelSupportsImages,
-                                    estimatedContextTokens: observedSession.estimatedContextTokens,
-                                    appliesAgentReasoningDefault: observedSession.appliesAgentReasoningDefault,
-                                    contextBreakdown: observedSession.estimatedContextBreakdown,
-                                    sessionSpendMicro: observedSession.sessionRouterSpendMicro,
-                                    sessionCachedInputLabel: {
-                                        let stats = observedSession.sessionRouterCacheStats
-                                        return OsaurusRouter.formatCachedInputLabel(
-                                            cachedTokens: stats.cachedInputTokens,
-                                            inputTokens: stats.inputTokens
-                                        )
-                                    }(),
-                                    isRouterBilledSession: observedSession.isOsaurusRouterSession,
-                                    workspacePoolLabel: workspacePoolLabel,
-                                    workspacePoolId: poolBillingWorkspaceId,
-                                    imageComposerSettings: $observedSession.imageComposerSettings,
-                                    onSend: { manualText in
-                                        if let manualText = manualText {
-                                            observedSession.input = manualText
-                                        }
-                                        if observedSession.isSendActiveForComposer {
-                                            observedSession.enqueueSend(
-                                                observedSession.input,
-                                                attachments: observedSession.pendingAttachments
-                                            )
-                                        } else {
-                                            observedSession.sendCurrent(directUserSend: true)
-                                        }
-                                    },
-                                    onStop: { observedSession.stop() },
-                                    focusTrigger: focusTrigger,
-                                    agentId: windowState.agentId,
-                                    windowId: windowState.windowId,
-                                    // Compact when a side column (sidebar
-                                    // or inspector) narrows the chat.
-                                    isCompact: sidebarVisible || inspectorVisible,
-                                    isEmptyChat: !observedSession.hasVisibleThreadMessages,
-                                    onClearChat: { observedSession.reset() },
-                                    onDraftChange: { observedSession.noteComposerDraft($0) },
-                                    onWillRehydrate: { observedSession.promoteComposerDraft() },
-                                    modelSwitchContinuityWarning:
-                                        observedSession.modelSwitchContinuityWarning,
-                                    onDismissModelSwitchContinuityWarning: {
-                                        observedSession.modelSwitchContinuityWarning = nil
-                                    },
-                                    onCaptureScreenshot: { observedSession.captureScreenshotFromSlashCommand() },
-                                    onGenerateTitle: { observedSession.generateTitleFromSlashCommand() },
-                                    onSkillSelected: { skillId in
-                                        observedSession.pendingOneOffSkillId = skillId
-                                    },
-                                    pendingSkillId: $observedSession.pendingOneOffSkillId,
-                                    autoSpeakAssistant: $observedSession.autoSpeakAssistant,
-                                    queuedSend: $observedSession.queuedSend,
-                                    onSendNow: { observedSession.sendNowInterrupting() },
-                                    onCancelQueued: { observedSession.cancelQueuedSend() },
-                                    onAddCredits: { showTopUpSheet = true },
-                                    isModelPinned: isRemoteAgentChrome,
-                                    pinnedModelLabel: pinnedModelChipLabel,
-                                    remoteConnectionPending: windowState.remoteAgentConnectionPhase
-                                        == .connecting,
-                                    composerLock: composerLock,
-                                    isRemoteAgentRun: isRemoteAgentChrome,
-                                    inputHistoryProvider: { [weak observedSession] in
-                                        guard let observedSession else { return [] }
-                                        return ChatInputHistory.entries(from: observedSession.turns)
-                                    },
-                                    inputHistoryKey: observedSession.sessionId,
-                                    compactionState: observedSession.compactionState,
-                                    canCompactConversation: observedSession
-                                        .canManuallyCompactConversation,
-                                    onCompactConversation: {
-                                        observedSession.requestManualCompaction()
-                                    },
-                                    warmupController: observedSession.warmupController,
-                                    folderState: observedSession.folderState
-                                )
-                                // Passed through the environment rather than as
-                                // an init argument: the initializer above is at
-                                // the type-checker's limit already.
-                                .environment(\.composerGeneration, observedSession.composerGeneration)
-                                .frame(maxWidth: 1100)
-                                .frame(maxWidth: .infinity)
-                                .opacity(isPromptOverlayActive ? 0.55 : 1.0)
-                                .allowsHitTesting(!isPromptOverlayActive)
-                                .animation(theme.springAnimation(), value: isPromptOverlayActive)
-                            }
-                        } else {
-                            // No models empty state
-                            ChatEmptyState(
-                                hasModels: false,
-                                selectedModel: nil,
-                                agents: windowState.agents,
-                                activeAgentId: windowState.agentId,
-                                quickActions: emptyStateQuickActions,
-                                onOpenModelManager: {
-                                    AppDelegate.shared?.showManagementWindow(initialTab: .models)
-                                },
-                                onUseFoundation: windowState.foundationModelAvailable
-                                    ? {
-                                        session.selectedModel = session.pickerItems.firstChatCapable?.id ?? "foundation"
-                                    } : nil,
-                                onQuickAction: { _ in },
-                                onOpenOnboarding: {
-                                    // If onboarding was already completed, just refresh models
-                                    // Don't reset onboarding - the user just finished it
-                                    if !OnboardingService.shared.shouldShowOnboarding {
-                                        Task { @MainActor in
-                                            await session.refreshPickerItems()
-                                        }
-                                        return
+
+                                // Run-liveness notice (slow / stalled) so a run
+                                // with no visible progress reads as a knowable
+                                // state with a recovery action, not a hang.
+                                runProgressNotice
+                                    .padding(.horizontal, Self.composerHorizontalInset)
+                                    .frame(maxWidth: 1100)
+                                    .frame(maxWidth: .infinity)
+                                    .animation(
+                                        theme.springAnimation(),
+                                        value: observedSession.runProgress.state
+                                    )
+
+                                // Follow-up suggestions render as a thread row
+                                // beneath the assistant message (see
+                                // `insertFollowUpSuggestionsIfNeeded`), not here.
+
+                                // Floating input card. Dimmed and
+                                // hit-test-disabled while a prompt overlay
+                                // is mounted so the prompt's embedded
+                                // input is the obvious place to type, and
+                                // accidental sends here can't race the
+                                // prompt resolution.
+                                // Hidden on a read-only conversation (a teammate's, or one
+                                // from the paired iPhone): nothing can be sent there, and the
+                                // notice above says where it continues.
+                                if !isReadOnlyConversation {
+                                    if let error = observedSession.turnParametersError {
+                                        Text(error).font(.caption).foregroundStyle(.red)
+                                            .padding(.horizontal, Self.composerHorizontalInset)
                                     }
-                                    // Only reset for users who never completed onboarding
-                                    OnboardingService.shared.resetOnboarding()
-                                    // Close this window so user can focus on onboarding
-                                    ChatWindowManager.shared.closeWindow(id: windowState.windowId)
-                                    // Show onboarding window
-                                    AppDelegate.shared?.showOnboardingWindow()
+                                    FloatingInputCard(
+                                        text: $observedSession.input,
+                                        selectedModel: $observedSession.selectedModel,
+                                        pendingAttachments: $observedSession.pendingAttachments,
+                                        isContinuousVoiceMode: $observedSession.isContinuousVoiceMode,
+                                        voiceInputState: $observedSession.voiceInputState,
+                                        showVoiceOverlay: $observedSession.showVoiceOverlay,
+                                        pickerItems: filteredPickerItems,
+                                        activeModelOptions: $observedSession.activeModelOptions,
+                                        turnOverrides: $observedSession.nextTurnOverrides,
+                                        isStreaming: observedSession.isSendActiveForComposer,
+                                        // Hide Stop ONLY while the redaction review
+                                        // sheet is actually on screen (the sheet owns
+                                        // its own Cancel and the streaming Task is
+                                        // suspended in its continuation). Crucially
+                                        // this is NOT gated on the broader
+                                        // "before first token" window, so Stop stays
+                                        // available during model load / prefill — the
+                                        // long pause a big model spends loading from
+                                        // disk while the typing-indicator shimmer is up.
+                                        isPrivacyReviewSheetVisible: pendingRedactionReview != nil,
+                                        supportsImages: observedSession.selectedModelSupportsImages,
+                                        estimatedContextTokens: observedSession.estimatedContextTokens,
+                                        appliesAgentReasoningDefault: observedSession.appliesAgentReasoningDefault,
+                                        contextBreakdown: observedSession.estimatedContextBreakdown,
+                                        sessionSpendMicro: observedSession.sessionRouterSpendMicro,
+                                        workspacePoolLabel: workspacePoolLabel,
+                                        workspacePoolId: poolBillingWorkspaceId,
+                                        imageComposerSettings: $observedSession.imageComposerSettings,
+                                        onSend: { manualText in
+                                            if let manualText = manualText {
+                                                observedSession.input = manualText
+                                            }
+                                            if observedSession.isSendActiveForComposer {
+                                                observedSession.enqueueSend(
+                                                    observedSession.input,
+                                                    attachments: observedSession.pendingAttachments
+                                                )
+                                            } else {
+                                                observedSession.sendCurrent(directUserSend: true)
+                                            }
+                                        },
+                                        onStop: { observedSession.stop() },
+                                        focusTrigger: focusTrigger,
+                                        agentId: windowState.agentId,
+                                        windowId: windowState.windowId,
+                                        // Compact while a side panel narrows
+                                        // the canvas.
+                                        isCompact: leftPanelOpen || projectInspectorVisible,
+                                        isEmptyChat: !observedSession.hasVisibleThreadMessages,
+                                        onClearChat: { observedSession.reset() },
+                                        onDraftChange: { observedSession.noteComposerDraft($0) },
+                                        onWillRehydrate: { observedSession.promoteComposerDraft() },
+                                        modelSwitchContinuityWarning:
+                                            observedSession.modelSwitchContinuityWarning,
+                                        onDismissModelSwitchContinuityWarning: {
+                                            observedSession.modelSwitchContinuityWarning = nil
+                                        },
+                                        onCaptureScreenshot: { observedSession.captureScreenshotFromSlashCommand() },
+                                        onGenerateTitle: { observedSession.generateTitleFromSlashCommand() },
+                                        onSkillSelected: { skillId in
+                                            observedSession.pendingOneOffSkillId = skillId
+                                        },
+                                        pendingSkillId: $observedSession.pendingOneOffSkillId,
+                                        autoSpeakAssistant: $observedSession.autoSpeakAssistant,
+                                        queuedSend: $observedSession.queuedSend,
+                                        onSendNow: { observedSession.sendNowInterrupting() },
+                                        onCancelQueued: { observedSession.cancelQueuedSend() },
+                                        isModelPinned: isRemoteAgentChrome,
+                                        pinnedModelLabel: pinnedModelChipLabel,
+                                        remoteConnectionPending: windowState.remoteAgentConnectionPhase
+                                            == .connecting,
+                                        composerLock: composerLock,
+                                        isRemoteAgentRun: isRemoteAgentChrome,
+                                        inputHistoryProvider: { [weak observedSession] in
+                                            guard let observedSession else { return [] }
+                                            return ChatInputHistory.entries(from: observedSession.turns)
+                                        },
+                                        inputHistoryKey: observedSession.sessionId,
+                                        compactionState: observedSession.compactionState,
+                                        canCompactConversation: observedSession
+                                            .canManuallyCompactConversation,
+                                        onCompactConversation: {
+                                            observedSession.requestManualCompaction()
+                                        },
+                                        warmupController: observedSession.warmupController,
+                                        folderState: observedSession.folderState
+                                    )
+                                    // Passed through the environment rather than as
+                                    // an init argument: the initializer above is at
+                                    // the type-checker's limit already.
+                                    .environment(\.composerGeneration, observedSession.composerGeneration)
+                                    .frame(maxWidth: 1100)
+                                    .frame(maxWidth: .infinity)
+                                    .opacity(isPromptOverlayActive ? 0.55 : 1.0)
+                                    .allowsHitTesting(!isPromptOverlayActive)
+                                    .animation(theme.springAnimation(), value: isPromptOverlayActive)
+                                }
+                            } else {
+                                // No models empty state
+                                ChatEmptyState(
+                                    hasModels: false,
+                                    selectedModel: nil,
+                                    agents: windowState.agents,
+                                    activeAgentId: windowState.agentId,
+                                    quickActions: emptyStateQuickActions,
+                                    onOpenModelManager: {
+                                        AppDelegate.shared?.showManagementWindow(initialTab: .models)
+                                    },
+                                    onUseFoundation: windowState.foundationModelAvailable
+                                        ? {
+                                            session.selectedModel =
+                                                session.pickerItems.firstChatCapable?.id ?? "foundation"
+                                        } : nil,
+                                    onQuickAction: { _ in },
+                                    onOpenOnboarding: {
+                                        // If onboarding was already completed, just refresh models
+                                        // Don't reset onboarding - the user just finished it
+                                        if !OnboardingService.shared.shouldShowOnboarding {
+                                            Task { @MainActor in
+                                                await session.refreshPickerItems()
+                                            }
+                                            return
+                                        }
+                                        // Only reset for users who never completed onboarding
+                                        OnboardingService.shared.resetOnboarding()
+                                        // Close this window so user can focus on onboarding
+                                        ChatWindowManager.shared.closeWindow(id: windowState.windowId)
+                                        // Show onboarding window
+                                        AppDelegate.shared?.showOnboardingWindow()
+                                    },
+                                    onRetryConnection: {
+                                        // Reconnect the managed Osaurus Router and any
+                                        // enabled providers, then re-resolve the picker.
+                                        await RemoteProviderManager.shared.connectEnabledProviders()
+                                        await session.refreshPickerItems()
+                                    },
+                                    onOpenProviders: {
+                                        AppDelegate.shared?.showManagementWindow(initialTab: .providers)
+                                    },
+                                )
+                            }
+                        }
+                        .animation(
+                            theme.springAnimation(responseMultiplier: 0.9),
+                            value: session.hasVisibleThreadMessages
+                        )
+
+                        // Project detail page, shown over the chat surface while
+                        // a project is open from the Projects flyout.
+                        // Opaque and full-size so the chat beneath neither shows
+                        // nor receives events.
+                        if let project = projectManager.project(for: windowState.openProjectId) {
+                            ProjectDetailView(
+                                project: project,
+                                windowState: windowState,
+                                onOpenSession: { data in
+                                    windowState.openProjectId = nil
+                                    windowState.enteredChatFromProjectPage = true
+                                    windowState.loadSession(data)
+                                    isPinnedToBottom = true
                                 },
-                                onRetryConnection: {
-                                    // Reconnect the managed Osaurus Router and any
-                                    // enabled providers, then re-resolve the picker.
-                                    await RemoteProviderManager.shared.connectEnabledProviders()
-                                    await session.refreshPickerItems()
-                                },
-                                onOpenProviders: {
-                                    AppDelegate.shared?.showManagementWindow(initialTab: .providers)
-                                },
+                                onNewChat: { windowState.startNewChat(in: project) },
+                                onDelete: {
+                                    ChatSessionsManager.shared.deleteProject(id: project.id)
+                                    if session.projectId == project.id {
+                                        session.projectId = nil
+                                    }
+                                    windowState.openProjectId = nil
+                                    windowState.refreshSessions()
+                                }
+                            )
+                            .transition(.opacity)
+                            .zIndex(2)
+                        }
+                            }
+                            .frame(width: canvasWidth, alignment: .topLeading)
+                            .frame(maxHeight: .infinity, alignment: .topLeading)
+                            .clipShape(chatCanvasShape)
+                            .animation(theme.animationQuick(), value: windowState.openProjectId)
+                            .offset(x: dockedLeftPanelWidth)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+
+                            ChatLeftNavigationPanel(
+                                windowState: windowState,
+                                width: Self.leftContentPanelWidth,
+                                sessionId: session.sessionId,
+                                focusSetId: $windowState.changesPanelFocusSetId,
+                                userPrompt: { userPromptExcerpt(for: $0) },
+                                onSelectSession: { data in
+                                    windowState.openProjectId = nil
+                                    windowState.enteredChatFromProjectPage = false
+                                    windowState.loadSession(data)
+                                    isPinnedToBottom = true
+                                }
+                            )
+                            .frame(width: Self.leftContentPanelWidth, alignment: .top)
+                            .frame(maxHeight: .infinity, alignment: .top)
+                            .offset(x: leftPanelOpen ? 0 : -Self.leftContentPanelWidth)
+                            .opacity(leftPanelOpen ? 1 : 0)
+                            .allowsHitTesting(leftPanelOpen)
+                            .accessibilityHidden(!leftPanelOpen)
+                            .zIndex(2)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                        .clipped()
+                    }
+                }
+                    .frame(width: contentAreaWidth, alignment: .topLeading)
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
+
+                if projectInspectorVisible {
+                    VStack(spacing: 0) {
+                        Color.clear
+                            .frame(height: titlebarContentInset)
+                            .allowsHitTesting(false)
+
+                        if let project = projectManager.project(for: windowState.openProjectId) {
+                            ProjectInspectorPanel(
+                                project: project,
+                                currentAgentId: windowState.agentId,
+                                width: projectSettingsWidth
                             )
                         }
                     }
-                    .animation(theme.springAnimation(responseMultiplier: 0.9), value: session.hasVisibleThreadMessages)
-
-                    // Project detail page, shown over the chat surface while
-                    // a project is open from the sidebar's Projects tab.
-                    // Opaque and full-size so the chat beneath neither shows
-                    // nor receives events.
-                    if let project = projectManager.project(for: windowState.openProjectId) {
-                        ProjectDetailView(
-                            project: project,
-                            windowState: windowState,
-                            onOpenSession: { data in
-                                windowState.openProjectId = nil
-                                windowState.enteredChatFromProjectPage = true
-                                windowState.loadSession(data)
-                                isPinnedToBottom = true
-                            },
-                            onNewChat: { windowState.startNewChat(in: project) },
-                            onDelete: {
-                                ChatSessionsManager.shared.deleteProject(id: project.id)
-                                if session.projectId == project.id {
-                                    session.projectId = nil
-                                }
-                                windowState.openProjectId = nil
-                                windowState.refreshSessions()
-                            }
-                        )
-                        .transition(.opacity)
-                        .zIndex(2)
+                    .frame(width: projectSettingsWidth, alignment: .top)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .clipped()
+                    .overlay(alignment: .leading) {
+                        projectSettingsResizeHandle
                     }
-                }
-                .animation(theme.animationQuick(), value: windowState.openProjectId)
-
-                // Right-hand rail: this chat's inspector (File Changes, or
-                // the past chats of its agent) or, while a project is on
-                // screen, that project's settings. One toolbar toggle,
-                // one width, one resize seam. Mirrors the sidebar column:
-                // same container, clipped to its width.
-                VStack(alignment: .leading, spacing: 0) {
-                    if projectInspectorVisible,
-                        let project = projectManager.project(for: windowState.openProjectId)
-                    {
-                        ProjectInspectorPanel(
-                            project: project,
-                            currentAgentId: windowState.agentId,
-                            width: inspectorWidth
-                        )
-                    } else if let inspectorPane {
-                        ChatInspectorPanel(
-                            windowState: windowState,
-                            pane: inspectorPane,
-                            width: inspectorWidth,
-                            sessionId: session.sessionId,
-                            focusSetId: $windowState.changesPanelFocusSetId,
-                            userPrompt: { userPromptExcerpt(for: $0) },
-                            // Same route as a sidebar row: the chat opens
-                            // in the current tab and the rail stays up.
-                            onSelectSession: { data in
-                                windowState.openProjectId = nil
-                                windowState.enteredChatFromProjectPage = false
-                                windowState.loadSession(data)
-                                isPinnedToBottom = true
-                            }
-                        )
-                    }
-                }
-                .frame(width: inspectorWidth, alignment: .top)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .clipped()
-                .overlay(alignment: .leading) {
-                    if inspectorVisible {
-                        inspectorResizeHandle
-                    }
-                }
-                .zIndex(1)
-            }
-            .animation(theme.animationQuick(), value: inspectorVisible)
-            // Publish the geometry-driven step-aside so the toolbar toggle
-            // and tab strip describe the sidebar actually on screen.
-            .onChange(of: sidebarAutoHidden, initial: true) { _, hidden in
-                if windowState.isSidebarAutoHidden != hidden {
-                    windowState.isSidebarAutoHidden = hidden
+                    .zIndex(1)
                 }
             }
-            // The rails' on-screen widths: the strip insets its leading and
-            // trailing edges by them so the tabs span exactly the chat
-            // column. `sidebarWidth` is already 0 while hidden or stepped
-            // aside and live during a resize drag (the persisted default
-            // only updates on release), so the strip never lags the rail.
-            .onChange(of: sidebarWidth, initial: true) { _, width in
-                if windowState.sidebarColumnWidth != width {
-                    windowState.sidebarColumnWidth = width
+            .animation(theme.animationQuick(), value: leftPanelOpen)
+            .animation(theme.animationQuick(), value: projectInspectorVisible)
+            // Toolbar tabs align with the chat canvas: 58pt while the panel
+            // is closed or overlaid, 358pt while it is docked.
+            .onChange(of: leadingNavigationWidth, initial: true) { _, width in
+                if windowState.leadingNavigationWidth != width {
+                    windowState.leadingNavigationWidth = width
                 }
             }
-            .onChange(of: inspectorWidth, initial: true) { _, width in
-                if windowState.inspectorColumnWidth != width {
-                    windowState.inspectorColumnWidth = width
-                }
-            }
-            // Deliberately NO `.onDisappear` reset of these published values.
-            // `ChatWindowRootView` remounts `ChatView` (`.id` on the session)
-            // for every tab switch / new tab, and SwiftUI runs the incoming
-            // instance's `initial: true` publish BEFORE the outgoing
-            // instance's `onDisappear`. A reset there found the value already
-            // equal, so the incoming publish was skipped and the reset then
-            // zeroed it: the tabs ran under the open inspector until its
-            // width next changed. The replacement instance republishes the
-            // real geometry, and a window that closes takes its state with it.
         }
         // Allow the window to narrow down to 800pt so it tiles beside other
-        // windows. With the sidebar open by default (260pt) plus the tab strip,
-        // anything narrower squished the chat column; the content is responsive
-        // (chips collapse to icons, tabs fold into an overflow menu), so a narrow
-        // width reflows the same UI rather than clipping it.
+        // windows. The 58pt rail and 300pt panel leave a 440pt canvas at that
+        // floor; narrower screens switch the panel to an overlay instead of
+        // compressing the canvas further.
         //
         // The floor is the window's `minimumContentSize`: the 800x620 design
         // minimum, clamped by `ChatWindowManager` to what the window's screen
@@ -10681,11 +10662,9 @@ struct ChatView: View {
             idealHeight: WindowConfiguration.chat.defaultSize.height,
             maxHeight: .infinity
         )
-        // No corner clipping here: the panel is opaque and AppKit masks the
-        // window frame at the system radius, which differs between macOS
-        // releases (26 and 27 disagree). A hardcoded radius left the
-        // content clipped tighter than the frame on 27, exposing the panel
-        // background in the corners.
+        // No corner clipping here: AppKit masks the panel and its native glass
+        // at the system radius, which differs between macOS releases. A
+        // hardcoded radius can clip the content tighter than the frame.
         .ignoresSafeArea()
         .onReceive(NotificationCenter.default.publisher(for: .chatToolbarBackToProject)) { notification in
             guard let targetWindowId = notification.userInfo?["windowId"] as? UUID,
@@ -10717,6 +10696,12 @@ struct ChatView: View {
                 let agent = notification.object as? DiscoveredAgent
             else { return }
             selectDiscoveredAgent(agent)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .chatToolbarOpenAgentPicker)) { notification in
+            guard let targetWindowId = notification.userInfo?["windowId"] as? UUID,
+                targetWindowId == windowState.windowId
+            else { return }
+            activeNavigatorFlyout = .agents
         }
         .onChange(of: windowState.pendingRelayConnect) { _, _ in
             consumePendingRelayConnect()
@@ -10867,12 +10852,9 @@ struct ChatView: View {
                     case .openChannelsSettings:
                         AppDelegate.shared?.showManagementWindow(initialTab: .agentChannels)
                     case .openProjects:
-                        // Projects live in this window's sidebar; open the
-                        // sidebar (it may be collapsed) and flip its lens to
-                        // Projects rather than opening the management window.
-                        withAnimation(windowState.theme.animationQuick()) {
-                            windowState.showSidebar = true
-                        }
+                        // Projects live in this window's navigation rail;
+                        // reveal the Projects flyout rather than opening the
+                        // management window. The 58pt rail is permanent.
                         ProjectManager.shared.pendingRevealProjectsTab = true
                     case .openOrchestratorSettings:
                         AppDelegate.shared?.showManagementWindow(initialTab: .orchestrator)
@@ -11144,7 +11126,7 @@ struct ChatView: View {
     }
 
     /// `preserveSession` keeps the current transcript (a workspace agent's
-    /// history reopened from the sidebar / History) instead of starting a
+    /// history reopened from the Chats panel) instead of starting a
     /// fresh chat — the connect itself is identical.
     /// Upper bound on the Mode 2 connect + model-pin handshake before the
     /// lock notice offers Retry.
@@ -11278,31 +11260,7 @@ struct ChatView: View {
     // MARK: - Background
 
     private var chatBackground: some View {
-        ZStack {
-            ThemedBackgroundLayer(
-                cachedBackgroundImage: windowState.cachedBackgroundImage
-            )
-
-            if theme.glassEnabled {
-                // Square: the window frame supplies the corners (see the root
-                // view's comment on corner clipping).
-                ThemedGlassSurface(cornerRadius: 0)
-                .allowsHitTesting(false)
-
-                let baseBacking = theme.windowBackingOpacity
-                let backingOpacity = baseBacking * (0.4 + theme.glassOpacityPrimary * 0.6)
-
-                LinearGradient(
-                    colors: [
-                        theme.primaryBackground.opacity(backingOpacity + theme.glassOpacityPrimary * 0.3),
-                        theme.primaryBackground.opacity(backingOpacity + theme.glassOpacitySecondary * 0.2),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .allowsHitTesting(false)
-            }
-        }
+        ThemedBackgroundLayer(cachedBackgroundImage: windowState.cachedBackgroundImage)
     }
 
     // MARK: - Header
@@ -11311,8 +11269,14 @@ struct ChatView: View {
         // Team layout: no agent identity in the chat header — the sidebar's
         // Agents list (open by default) carries the selection; project
         // membership shows as a folder glyph on the session tab.
+        // The native inset supplies part of this 52pt clearance in windowed
+        // mode. Full screen already has its own in-content toolbar header.
         Color.clear
-            .frame(height: 52)
+            .frame(
+                height: windowState.isFullScreen
+                    ? 0
+                    : max(0, 52 - windowState.titlebarContentInset)
+            )
             .allowsHitTesting(false)
     }
 

@@ -2,7 +2,7 @@
 //  ChatSessionSidebar.swift
 //  osaurus
 //
-//  The chat window's left rail: Agents | Projects lenses.
+//  Permanent 58pt chat-window navigation rail and its anchored flyouts.
 //
 
 import AppKit
@@ -22,18 +22,16 @@ struct ChatSessionSidebar: View {
     let sessions: [ChatSessionData]
     /// The window's currently-active agent: the highlighted Agents row.
     /// Switching it (row tap, tab switch, `loadSession`) marks the agent
-    /// seen and, unless the user is browsing a project, returns the rail
-    /// to the Agents lens.
+    /// seen in the visible agent list.
     let agentId: UUID
-    /// True while the active chat was entered from its project's detail
-    /// page (or started there via ⌘N). The Projects lens stays put when the
-    /// agent changes for that reason: the user is browsing a project, not
-    /// picking an agent, so flipping to the Agents lens would lose their
-    /// place. Explicit agent picks clear the flag before switching.
-    var keepsProjectsLens: Bool = false
-    /// Live width of the rail, driven by the parent's resize handle so the
-    /// inner content (titles, chips, rows) reflows to fill the chosen width.
-    var width: CGFloat = SidebarStyle.width
+    @ObservedObject var windowState: ChatWindowState
+    /// Fixed width of the compact rail.
+    var width: CGFloat = SidebarStyle.compactRailWidth
+    /// The active identity includes local and selected remote agents.
+    private var activeAgentIdentity: ChatThreadIdentity { windowState.effectiveChatIdentity }
+    /// The one rail flyout open in this window, shared with ChatView for
+    /// commands that open the agent switcher or Projects list.
+    @Binding var activeFlyout: NavigatorFlyout?
     /// Open a chat in the window's current tab (e.g. a workspace agent's
     /// row resuming its last conversation).
     let onSelect: (ChatSessionData) -> Void
@@ -41,17 +39,15 @@ struct ChatSessionSidebar: View {
     let onDeleteProject: (UUID) -> Void
     /// Open a project in the window's content area.
     var onOpenProject: ((Project) -> Void)? = nil
-    /// The project on screen, if any: its row is the selected one on the
-    /// Projects lens, the way the active agent's row is on Agents.
+    /// The project on screen, if any: its row is selected in the Projects
+    /// flyout.
     var openProjectId: UUID? = nil
     /// Stop the live run driving the given session id. Rows only offer the
     /// control while `SessionActivityMonitor` reports the session active.
     var onStop: ((UUID) -> Void)? = nil
     /// Open a chat in a new tab of this window (browser-style).
     var onOpenInNewTab: ((ChatSessionData) -> Void)? = nil
-    /// Select an agent for this window (agents-focused sidebar prototype —
-    /// replaces the removed agent-selector pill; same effect as picking an
-    /// agent from it).
+    /// Select an agent for this window using its existing tab-switch route.
     var onSelectAgent: ((UUID) -> Void)? = nil
     /// Start a fresh chat with a local agent straight from its row (hover
     /// "+" / context menu), without selecting the agent first.
@@ -79,6 +75,14 @@ struct ChatSessionSidebar: View {
     /// Select a LAN-discovered agent: runs the pairing sheet on first pick,
     /// then connects — the same flow the removed agent pill drove.
     var onSelectDiscoveredAgent: ((DiscoveredAgent) -> Void)? = nil
+    /// The old composer balance control was suppressed while a remote agent
+    /// connected, during a remote-agent run, and for workspace-pool billing.
+    var creditsIndicatorHidden: Bool = false
+    /// Active-session context retained by the wallet activity popover.
+    var isRouterBilledSession: Bool = false
+    var sessionSpendMicro: Int = 0
+    var sessionCachedInputLabel: String? = nil
+    var onAddCredits: (() -> Void)? = nil
     /// Export formats offered by chat rows; the type lives here because the
     /// sidebar has always been its home (`ChatSessionExportCoordinator`,
     /// `ExportChooserSheet` and `ChatHistoryList` share it).
@@ -117,62 +121,71 @@ struct ChatSessionSidebar: View {
     /// Agents that appeared during this app run and haven't been opened
     /// yet; their rows carry an accent ring and a "New" pill until tapped.
     @ObservedObject private var newAgentHighlight = NewAgentHighlightStore.shared
-    /// Top-level sidebar lens: who (agents) or where (projects). Past
-    /// chats live in the inspector on the right, scoped to the tab on
-    /// screen.
-    @State private var selectedTab: SidebarTab = .agents
-    /// The lens's search query (row 3 of the rail, like History's search).
-    /// Narrows the current lens by name; cleared when the lens changes.
+    /// Shared query for the Agents and Projects flyouts.
     @State private var navigatorQuery: String = ""
+    @State private var isAgentAvatarHovered = false
     @FocusState private var isNavigatorSearchFocused: Bool
 
-    enum SidebarTab: Hashable {
+    enum NavigatorFlyout: Hashable {
         case agents
         case projects
     }
 
     var body: some View {
-        SidebarContainer(attachedEdge: .leading, topPadding: 40, width: width) {
-            // Agents | Projects lens switcher, above the section header so
-            // the lens is the first thing the eye lands on. As the first
-            // child it owns the window-control clearance the header used to
-            // provide (the container's 40pt only clears the traffic lights).
-            sidebarTabBar
-                // Tour spotlight anchor (invisible; reports the lens bar's frame).
-                .background(TourAnchorMarker(anchor: .sidebarLensBar))
-                .padding(.horizontal, 12)
-                .padding(.top, 16)
+        SidebarContainer(
+            attachedEdge: .leading,
+            topPadding: max(0, windowState.titlebarContentInset - 10),
+            width: width,
+            usesWindowChromeBackground: true,
+            showsBorder: false
+        ) {
+            VStack(spacing: 0) {
+                VStack(spacing: 6) {
+                    NavigationRailButton(
+                        icon: "bubble.left.and.bubble.right",
+                        title: "Chats",
+                        isSelected: windowState.isLeftPanelOpen && windowState.leftPanelMode == .chats
+                    ) {
+                        withAnimation(theme.animationQuick()) {
+                            activeFlyout = nil
+                            windowState.showLeftPanel(.chats)
+                        }
+                    }
+                    railButton(icon: "folder", title: "Projects", flyout: .projects) {
+                        projectsFlyout
+                    }
+                }
+                .padding(.top, 10)
+
+                Spacer(minLength: 12)
+
+                VStack(spacing: 8) {
+                    CreditsRailIndicator(
+                        ringState: windowState.creditsRailRingState,
+                        isSuppressed: creditsIndicatorHidden,
+                        isRouterBilledSession: isRouterBilledSession,
+                        sessionSpendMicro: sessionSpendMicro,
+                        sessionCachedInputLabel: sessionCachedInputLabel,
+                        onAddCredits: onAddCredits
+                    )
+
+                    NavigationRailButton(icon: "gearshape", title: "Settings") {
+                        activeFlyout = nil
+                        AppDelegate.shared?.showManagementWindow(initialTab: nil)
+                    }
+
+                    agentSwitcherButton
+                }
                 .padding(.bottom, 12)
-
-            // Header row (count + the lens's one action) and the search
-            // row: the same two rows the inspector's panes have.
-            sidebarHeader
-            navigatorSearchRow
-
-            switch selectedTab {
-            case .agents:
-                // One row per agent; tapping selects it for this window.
-                // The window's tabs and the inspector's History follow.
-                agentListView
-            case .projects:
-                // Project browser: one row per project; opening one shows
-                // the project detail page in the window's content area.
-                projectListView
             }
-
-            // Settings lives at the foot of the sidebar (moved out of the
-            // title bar so it stays tabs + chat controls).
-            sidebarFooter
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        // Switching lenses is a context change: the query belonged to
-        // the previous list.
-        .onChange(of: selectedTab) { _, _ in
+        .onExitCommand { activeFlyout = nil }
+        .onChange(of: activeFlyout) { _, _ in
             navigatorQuery = ""
+            isNavigatorSearchFocused = false
         }
         .onChange(of: agentId) { _, newAgentId in
-            // Browsing a project keeps the Projects lens; otherwise the
-            // rail returns to the agent just picked.
-            if !keepsProjectsLens { selectedTab = .agents }
             // Opening an agent by any route (row tap, tab switch, deep link)
             // is "seen": the new-agent ring comes off.
             if workspaceAgentAddress == nil {
@@ -191,11 +204,9 @@ struct ChatSessionSidebar: View {
                 newAgentHighlight.markSeen(localAgentId: agentId)
             }
         }
-        // Deep link from the "What's New" projects announcement: flip the
-        // lens to Projects so the user lands on the new feature. The mutation
-        // is deferred to the next runloop tick: assigning `selectedTab`
-        // synchronously inside an onChange driven by an ObservableObject
-        // publish is a reentrant state change SwiftUI can silently drop.
+        // Deep link from the "What's New" projects announcement: open the
+        // Projects flyout. Defer the state change because this publisher is
+        // emitted by an ObservableObject update.
         .onChange(of: projectManager.pendingRevealProjectsTab) { _, reveal in
             guard reveal else { return }
             revealProjectsTab()
@@ -207,13 +218,6 @@ struct ChatSessionSidebar: View {
         }
     }
 
-    /// Trimmed query; empty means the lens shows everything.
-    private var trimmedNavigatorQuery: String {
-        navigatorQuery.trimmingCharacters(in: .whitespaces)
-    }
-
-    private var isFilteringNavigator: Bool { !trimmedNavigatorQuery.isEmpty }
-
     /// Pure name filter shared by every navigator list (testable): keeps
     /// the items whose name matches `query` the way the chat search does.
     nonisolated static func filterByName<T>(_ items: [T], query: String, name: (T) -> String) -> [T] {
@@ -224,29 +228,133 @@ struct ChatSessionSidebar: View {
 
     private func revealProjectsTab() {
         DispatchQueue.main.async {
-            selectedTab = .projects
+            navigatorQuery = ""
+            activeFlyout = .projects
             projectManager.pendingRevealProjectsTab = false
         }
     }
 
-    // MARK: - Tab Bar
-
-    /// Lens switcher shared with the right rail (`SidebarLensBar`):
-    /// equal-width segments, accent-tinted when selected.
-    private var sidebarTabBar: some View {
-        SidebarLensBar(
-            selection: $selectedTab,
-            segments: [
-                .init(value: .agents, label: "Agents", icon: "person.2"),
-                .init(value: .projects, label: "Projects", icon: "folder"),
-            ]
+    private func flyoutBinding(for flyout: NavigatorFlyout) -> Binding<Bool> {
+        Binding(
+            get: { activeFlyout == flyout },
+            set: { isPresented in
+                if isPresented {
+                    activeFlyout = flyout
+                } else if activeFlyout == flyout {
+                    activeFlyout = nil
+                }
+            }
         )
+    }
+
+    private func railButton<Content: View>(
+        icon: String,
+        title: LocalizedStringKey,
+        flyout: NavigatorFlyout,
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        NavigationRailButton(icon: icon, title: title, isSelected: activeFlyout == flyout) {
+            withAnimation(theme.animationQuick()) {
+                activeFlyout = activeFlyout == flyout ? nil : flyout
+            }
+        }
+        .popover(isPresented: flyoutBinding(for: flyout), arrowEdge: .leading) {
+            content()
+        }
+    }
+
+    private var agentSwitcherButton: some View {
+        Button {
+            withAnimation(theme.animationQuick()) {
+                activeFlyout = activeFlyout == .agents ? nil : .agents
+            }
+        } label: {
+            AgentAvatarView(
+                mascotId: activeAgentIdentity.mascotId,
+                name: activeAgentIdentity.name,
+                tint: theme.accentColor,
+                diameter: 34,
+                customImageURL: activeAgentIdentity.customAvatarPath.map(URL.init(fileURLWithPath:)),
+                monogramFontSize: 14,
+                borderWidth: 0
+            )
+            .frame(width: 40, height: 40)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(
+                        activeFlyout == .agents
+                            ? theme.accentColor.opacity(theme.isDark ? 0.18 : 0.12)
+                            : (isAgentAvatarHovered ? theme.secondaryText.opacity(theme.isDark ? 0.12 : 0.08) : .clear)
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(theme.animationQuick()) {
+                isAgentAvatarHovered = hovering
+            }
+        }
+        .help(Text("Switch Agent", bundle: .module))
+        .accessibilityLabel(Text("Switch Agent", bundle: .module))
+        .accessibilityValue(Text(activeAgentIdentity.name))
+        .accessibilityAddTraits(activeFlyout == .agents ? .isSelected : [])
+        .background(TourAnchorMarker(anchor: .agentSwitcher))
+        .popover(isPresented: flyoutBinding(for: .agents), arrowEdge: .leading) {
+            agentsFlyout
+        }
+    }
+
+    private var agentsFlyout: some View {
+        VStack(spacing: 0) {
+            SidebarTitleRow("Agents") {
+                SidebarHeaderIconButton(icon: "plus", help: "New Agent", size: 14) {
+                    activeFlyout = nil
+                    AppDelegate.shared?.showManagementWindow(
+                        initialTab: .agents, deeplinkCreateAgent: true)
+                }
+            }
+            navigatorSearchRow(placeholder: "Search agents…")
+            agentListView
+        }
+        .frame(width: 304, height: 560)
+        .onExitCommand { activeFlyout = nil }
+    }
+
+    private var projectsFlyout: some View {
+        VStack(spacing: 0) {
+            SidebarTitleRow("Projects") {
+                SidebarHeaderIconButton(icon: "plus", help: "New Project", size: 14) {
+                    requestNewProject()
+                }
+            }
+            navigatorSearchRow(placeholder: "Search projects…")
+            projectListView
+        }
+        .frame(width: 304, height: 560)
+        .onExitCommand { activeFlyout = nil }
+    }
+
+    private var trimmedNavigatorQuery: String {
+        navigatorQuery.trimmingCharacters(in: .whitespaces)
+    }
+
+    private var isFilteringNavigator: Bool { !trimmedNavigatorQuery.isEmpty }
+
+    private func navigatorSearchRow(placeholder: LocalizedStringKey) -> some View {
+        SidebarSearchField(
+            text: $navigatorQuery,
+            placeholder: placeholder,
+            isFocused: $isNavigatorSearchFocused
+        )
+        .frame(minHeight: 28)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
     }
 
     // MARK: - Project List
 
-    /// The Projects tab's top level: one row per project. Tapping a row
-    /// drills into that project's chats.
+    /// Project selection opens the original detail route in the main area.
     private var projectListView: some View {
         let projects = Self.filterByName(projectManager.projects, query: navigatorQuery, name: \.name)
         return Group {
@@ -264,6 +372,7 @@ struct ChatSessionSidebar: View {
                                 isSelected: project.id == openProjectId,
                                 onOpen: {
                                     onOpenProject?(project)
+                                    activeFlyout = nil
                                 },
                                 onRename: { requestRenameProject(project) },
                                 onEditInstructions: { requestEditProjectInstructions(project) },
@@ -279,7 +388,7 @@ struct ChatSessionSidebar: View {
         }
     }
 
-    /// Empty state for the Projects tab, in the rails' shared idiom; the
+    /// Empty state for the Projects flyout, in the rails' shared idiom; the
     /// explainer of what a project is lives in the New Project dialog.
     private var projectsEmptyState: some View {
         SidebarEmptyState(icon: "folder", title: "No projects yet")
@@ -297,6 +406,7 @@ struct ChatSessionSidebar: View {
             let project = ProjectManager.shared.create(name: name)
             // Land the user straight on the fresh project's page.
             onOpenProject?(project)
+            activeFlyout = nil
         }
     }
 
@@ -402,84 +512,7 @@ struct ChatSessionSidebar: View {
         )
     }
 
-    // MARK: - Footer
-
-    /// Settings at the foot of the rail, in the row anatomy: the glyph sits
-    /// in the 26pt avatar column so the label lines up with the row titles
-    /// above, and a hairline separates it from the list.
-    private var sidebarFooter: some View {
-        VStack(spacing: 0) {
-            Divider().opacity(0.4).padding(.horizontal, 12)
-            SidebarFooterRow(icon: "gearshape", title: "Settings") {
-                AppDelegate.shared?.showManagementWindow(initialTab: nil)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 8)
-        }
-    }
-
-    // MARK: - Header and search rows
-
-    /// Row 2 of the rail, the same `SidebarHeaderRow` the inspector's panes
-    /// use: what the lens holds on the left ("8 agents", "3 projects"),
-    /// the lens's one create action on the right. Both lenses use the
-    /// same `plus`; what it creates is the lens.
-    private var sidebarHeader: some View {
-        SidebarHeaderRow(summary: navigatorSummary) {
-            switch selectedTab {
-            case .agents:
-                // Agent creation is a full form, so it opens in Settings ›
-                // Agents. New Chat and Import live in the inspector's
-                // History pane.
-                SidebarHeaderIconButton(icon: "plus", help: "New Agent", size: 14) {
-                    AppDelegate.shared?.showManagementWindow(
-                        initialTab: .agents, deeplinkCreateAgent: true)
-                }
-            case .projects:
-                SidebarHeaderIconButton(icon: "plus", help: "New Project", size: 14) {
-                    requestNewProject()
-                }
-            }
-        }
-    }
-
-    private var navigatorSummary: String {
-        switch selectedTab {
-        case .agents:
-            let count = agentRowCount
-            return L("\(count) agents")
-        case .projects:
-            let count = projectManager.projects.count
-            return L("\(count) projects")
-        }
-    }
-
-    /// Everyone the Agents lens lists: local agents, teammates' shared
-    /// agents on loaded rosters (the user's own mirrors are already counted
-    /// as local), orphaned workspace pairings, direct shares and network
-    /// peers.
-    private var agentRowCount: Int {
-        let local = agentManager.agents.count
-        let teammates = rosterStore.rosters.reduce(0) { total, roster in
-            total + roster.agents.filter { localAgent(sharedAs: $0.agentAddress.lowercased()) == nil }.count
-        }
-        let orphaned = orphanedWorkspacePairings.values.reduce(0) { $0 + $1.count }
-        return local + teammates + orphaned + directlySharedAgents.count + visibleDiscoveredAgents.count
-    }
-
-    /// Row 3: search, same field and insets as the History pane's.
-    private var navigatorSearchRow: some View {
-        SidebarSearchField(
-            text: $navigatorQuery,
-            placeholder: selectedTab == .agents ? "Search agents…" : "Search projects…",
-            isFocused: $isNavigatorSearchFocused
-        )
-        .frame(minHeight: 28)
-        .padding(.horizontal, 12)
-        .padding(.bottom, 8)
-    }
-
-    // MARK: - Agent List (prototype)
+    // MARK: - Agent List
 
     /// Agents-focused sidebar: one row per local agent, active row
     /// highlighted, tap to make it this window's agent.
@@ -551,11 +584,13 @@ struct ChatSessionSidebar: View {
                         onSelect: {
                             newAgentHighlight.markSeen(localAgentId: agent.id)
                             onSelectAgent?(agent.id)
+                            activeFlyout = nil
                         },
                         onNewChat: onNewChatWithAgent.map { start in
                             {
                                 newAgentHighlight.markSeen(localAgentId: agent.id)
                                 start(agent.id)
+                                activeFlyout = nil
                             }
                         },
                         onStop: activity == nil ? nil : { stopActivity(for: agent) },
@@ -663,6 +698,7 @@ struct ChatSessionSidebar: View {
                     onSelect: {
                         newAgentHighlight.markSeen(sharedAgentAddress: address)
                         onSelectWorkspaceAgent?(address, "")
+                        activeFlyout = nil
                     },
                     onRemove: { removeDirectShare(remote) }
                 )
@@ -711,7 +747,10 @@ struct ChatSessionSidebar: View {
                 DiscoveredAgentSidebarRow(
                     agent: agent,
                     isSelected: activeDiscoveredAgentId == agent.id,
-                    onSelect: { onSelectDiscoveredAgent?(agent) }
+                    onSelect: {
+                        onSelectDiscoveredAgent?(agent)
+                        activeFlyout = nil
+                    }
                 )
             }
         }
@@ -829,6 +868,7 @@ struct ChatSessionSidebar: View {
                         onSelect: {
                             newAgentHighlight.markSeen(sharedAgentAddress: address)
                             onSelectWorkspaceAgent?(address, workspaceId)
+                            activeFlyout = nil
                         },
                         onOpenWorkspace: { openWorkspaceInSettings(id: workspaceId) }
                     )
@@ -966,7 +1006,10 @@ struct ChatSessionSidebar: View {
                             status: ownAgentStatus(mine),
                             isSelected: mine.id == agentId && workspaceAgentAddress == nil,
                             activityStatus: activityStatus(for: mine),
-                            onSelect: { onSelectAgent?(mine.id) },
+                            onSelect: {
+                                onSelectAgent?(mine.id)
+                                activeFlyout = nil
+                            },
                             onOpenSettings: {
                                 AppDelegate.shared?.showManagementWindow(
                                     initialTab: .agents, deeplinkAgentId: mine.id)
@@ -987,6 +1030,7 @@ struct ChatSessionSidebar: View {
                             onSelect: {
                                 newAgentHighlight.markSeen(sharedAgentAddress: address)
                                 onSelectWorkspaceAgent?(address, workspace.id)
+                                activeFlyout = nil
                             },
                             onOpenInNewWindow: {
                                 ChatWindowManager.shared.openNewChatWindow(withWorkspaceAgentAddress: address,
@@ -2265,7 +2309,7 @@ private struct SessionRow: View {
     var onOpenInNewWindow: (() -> Void)? = nil
     /// Optional callback for opening in a new tab of the current window
     var onOpenInNewTab: (() -> Void)? = nil
-    /// Open this chat with its File Changes inspector showing.
+    /// Open this chat with the left File Changes panel showing.
     var onShowFileChanges: (() -> Void)? = nil
 
     @Environment(\.theme) private var theme
@@ -2719,7 +2763,7 @@ private struct SessionRow: View {
     }
 
     /// File history badge: outstanding changed files (or a dimmed icon when
-    /// every change was reverted). Opens the chat's File Changes inspector.
+    /// every change was reverted). Opens the chat's File Changes panel.
     private func fileChangesBadge(_ summary: FileChangeSessionSummary) -> some View {
         let active = summary.outstandingFiles > 0
         let color = active ? theme.accentColor : theme.tertiaryText
@@ -3151,6 +3195,8 @@ struct DontAskAgainToggle: View {
             ChatSessionSidebar(
                 sessions: [],
                 agentId: Agent.defaultId,
+                windowState: ChatWindowState(windowId: UUID(), agentId: Agent.defaultId),
+                activeFlyout: .constant(nil),
                 onSelect: { _ in },
                 onDeleteProject: { _ in }
             )
@@ -3159,10 +3205,11 @@ struct DontAskAgainToggle: View {
     }
 #endif
 
-// MARK: - History List (inspector pane)
+// MARK: - History List
 
-/// The chat list behind the inspector's History pane (`ChatHistoryPaneView`):
-/// search (title, metadata and full-text over message bodies) above the
+/// The shared chat list used by the left content panel's History mode
+/// (`ChatHistoryPaneView`) and other chat-history surfaces: search (title,
+/// metadata and full-text over message bodies) above the
 /// same `SessionRow`s with activity rings, capability badges and the
 /// per-row actions popover. Reuses the sidebar's private row types.
 struct ChatHistoryList: View {
@@ -3200,7 +3247,7 @@ struct ChatHistoryList: View {
     /// Resets the dialog's source / archived lenses from the empty state.
     var onClearFilters: (() -> Void)? = nil
     /// Cap on the list's height. The dialog capped it at 360pt; the
-    /// inspector's History pane passes nil so the list fills the rail.
+    /// Chats panel passes nil so the list fills its available height.
     var listMaxHeight: CGFloat? = 360
     /// Control shown at the trailing end of the search row (the host's
     /// Filter button), so search and filter form one row.
@@ -3571,5 +3618,378 @@ private struct AgentRowFramesKey: PreferenceKey {
     static let defaultValue: [UUID: CGRect] = [:]
     static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { $1 })
+    }
+}
+
+/// Icon button used by the compact navigation rail. The 40pt target gives
+/// the glyph room to breathe without adding a separate glass surface.
+private struct NavigationRailButton: View {
+    let icon: String
+    let title: LocalizedStringKey
+    var isSelected = false
+    let action: () -> Void
+
+    @Environment(\.theme) private var theme
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: isSelected ? .semibold : .regular))
+                .foregroundColor(isSelected || isHovered ? theme.accentColor : theme.secondaryText)
+                .frame(width: 40, height: 40)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(backgroundColor)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .onHover { hovering in
+            withAnimation(theme.animationQuick()) {
+                isHovered = hovering
+            }
+        }
+        .help(Text(title, bundle: .module))
+        .accessibilityLabel(Text(title, bundle: .module))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private var backgroundColor: Color {
+        if isSelected { return theme.accentColor.opacity(theme.isDark ? 0.18 : 0.12) }
+        if isHovered { return theme.secondaryText.opacity(theme.isDark ? 0.12 : 0.08) }
+        return .clear
+    }
+}
+
+/// Account-level Credits control in the permanent navigation rail. Its
+/// per-window baseline lives on `ChatWindowState`, so tab changes do not
+/// redefine the ring's starting balance.
+struct CreditsRailIndicator: View {
+    let isSuppressed: Bool
+    let isRouterBilledSession: Bool
+    let sessionSpendMicro: Int
+    let sessionCachedInputLabel: String?
+    let onAddCredits: (() -> Void)?
+
+    @ObservedObject var ringState: CreditsRailRingState
+    @ObservedObject private var accountService = OsaurusRouterAccountService.shared
+    @ObservedObject private var remoteProviders = RemoteProviderManager.shared
+    @Environment(\.theme) private var theme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.accessibilityReduceTransparency) private var accessibilityReduceTransparency
+
+    @State private var showWalletPanel = false
+    @State private var walletPanelPinned = false
+    @State private var walletHover = HoverPreviewPresence()
+    @State private var walletPanelHeight: CGFloat = 0
+    @State private var walletOpenTask: Task<Void, Never>?
+    @State private var walletDismissTask: Task<Void, Never>?
+
+    init(
+        ringState: CreditsRailRingState,
+        isSuppressed: Bool,
+        isRouterBilledSession: Bool,
+        sessionSpendMicro: Int,
+        sessionCachedInputLabel: String?,
+        onAddCredits: (() -> Void)?
+    ) {
+        self.ringState = ringState
+        self.isSuppressed = isSuppressed
+        self.isRouterBilledSession = isRouterBilledSession
+        self.sessionSpendMicro = sessionSpendMicro
+        self.sessionCachedInputLabel = sessionCachedInputLabel
+        self.onAddCredits = onAddCredits
+    }
+
+    private enum BalanceLevel {
+        case healthy
+        case low
+        case empty
+    }
+
+    private var creditsAvailable: Bool {
+        remoteProviders.isOsaurusRouterEnabled
+            && !remoteProviders.isOffline
+            && OsaurusIdentity.existsCached()
+    }
+
+    private var balanceLevel: BalanceLevel {
+        guard let micro = currentBalanceMicro else { return .empty }
+        if micro <= 0 || accountService.isFrozen { return .empty }
+        if micro < 1_000_000 { return .low }
+        return .healthy
+    }
+
+    private var currentBalanceMicro: Int64? {
+        guard let rawValue = accountService.balance?.balanceMicro,
+            let micro = Int64(rawValue), micro >= 0
+        else { return nil }
+        return micro
+    }
+
+    private var ringProgress: CreditsRailRingProgress {
+        ringState.progress(for: accountService.balance?.balanceMicro)
+    }
+
+    private var helpText: Text {
+        guard currentBalanceMicro != nil else {
+            if accountService.isLoadingBalance {
+                return Text(verbatim: "\(L("Credits")): \(L("Loading"))")
+            }
+            return Text(verbatim: "\(L("Credits")): \(L("Unavailable"))")
+        }
+        if accountService.isFrozen {
+            return Text(
+                "\(accountService.formattedBalance) router balance. Account paused - add credits to resume.",
+                bundle: .module
+            )
+        }
+        if balanceLevel == .empty, onAddCredits != nil {
+            return Text("\(accountService.formattedBalance) router balance. Click to add credits.", bundle: .module)
+        }
+        return Text("\(accountService.formattedBalance) router balance. Click to open the wallet.", bundle: .module)
+    }
+
+    private var actionHint: Text {
+        guard currentBalanceMicro != nil else {
+            return Text("Unavailable", bundle: .module)
+        }
+        if balanceLevel == .empty, onAddCredits != nil {
+            return Text("Click to add credits", bundle: .module)
+        }
+        return Text("Click to open the wallet.", bundle: .module)
+    }
+
+    private var indicatorButton: some View {
+        Button(action: handleIndicatorTap) {
+            ring
+                .frame(width: 40, height: 40)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .disabled(currentBalanceMicro == nil)
+        .help(helpText)
+        .accessibilityLabel(helpText)
+        .accessibilityHint(actionHint)
+        .onHover(perform: updateHover)
+        .anchoredCard(
+            isPresented: $showWalletPanel,
+            size: CGSize(width: PickerCardMetrics.infoCardWidth, height: walletPanelHeight),
+            alignment: .trailing,
+            constrainToWindow: true,
+            takesFocus: walletPanelPinned,
+            accessibilityLabel: L("Credits")
+        ) {
+            WalletPopover(
+                sessionSpend: isRouterBilledSession ? OsaurusRouter.formatMicroAsCredits(String(sessionSpendMicro)) : nil,
+                sessionCachedInputLabel: isRouterBilledSession ? sessionCachedInputLabel : nil,
+                isAttention: isRouterBilledSession && balanceLevel != .healthy,
+                onAddCredits: {
+                    closeWalletPanel()
+                    onAddCredits?()
+                },
+                onViewAll: {
+                    closeWalletPanel()
+                    AppDelegate.shared?.showManagementWindow(initialTab: .credits)
+                },
+                onHeightChange: { walletPanelHeight = $0 }
+            )
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                walletHover.isOverPanel = hovering
+                if hovering {
+                    walletDismissTask?.cancel()
+                } else if !walletPanelPinned {
+                    scheduleWalletDismiss()
+                }
+            }
+        }
+        .onChange(of: showWalletPanel) { _, isShown in
+            if !isShown {
+                walletHover.isOverPanel = false
+                walletPanelPinned = false
+                walletPanelHeight = 0
+                walletOpenTask?.cancel()
+                walletDismissTask?.cancel()
+            }
+        }
+        .onDisappear {
+            walletOpenTask?.cancel()
+            walletDismissTask?.cancel()
+        }
+    }
+
+    private var ring: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                CreditsUpperArc()
+                    .stroke(trackColor, style: arcStroke)
+
+                if case .determinate(let fraction) = ringProgress, fraction > 0 {
+                    CreditsUpperArc()
+                        .trim(from: 0, to: fraction)
+                        .stroke(activeArcColor, style: arcStroke)
+                }
+            }
+            .frame(width: 30, height: 10)
+
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(supportingTextColor)
+                .frame(width: 20, height: 17)
+
+            Text(abbreviatedBalance)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(supportingTextColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 40, height: 13)
+        }
+        .frame(width: 40, height: 40)
+    }
+
+    private var arcStroke: StrokeStyle {
+        StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round)
+    }
+
+    private var abbreviatedBalance: String {
+        guard let currentBalanceMicro else {
+            return accountService.isLoadingBalance ? "…" : "—"
+        }
+        let formatted = OsaurusRouter.formatMicroAsCreditsCompactForRail(String(currentBalanceMicro))
+        return String(formatted.split(separator: " ", maxSplits: 1).first ?? "0")
+    }
+
+    private var trackColor: Color {
+        if needsEnhancedContrast {
+            return theme.secondaryText.opacity(theme.isDark ? 0.82 : 0.72)
+        }
+        return theme.tertiaryText.opacity(theme.isDark ? 0.46 : 0.4)
+    }
+
+    private var activeArcColor: Color {
+        if needsEnhancedContrast {
+            return theme.primaryText
+        }
+        return theme.accentColor
+    }
+
+    private var supportingTextColor: Color {
+        needsEnhancedContrast ? theme.primaryText : theme.secondaryText
+    }
+
+    private var needsEnhancedContrast: Bool {
+        colorSchemeContrast == .increased || accessibilityReduceTransparency
+    }
+
+    var body: some View {
+        Group {
+            if creditsAvailable && !isSuppressed {
+                indicatorButton
+            }
+        }
+        // The previous composer control used this same freshness window and
+        // shared account-service refresh path; no polling is added here.
+        .task(id: creditsAvailable) {
+            if creditsAvailable {
+                await accountService.refreshBalance(ifOlderThan: 300)
+            }
+        }
+        .onAppear {
+            ringState.observe(balanceMicro: accountService.balance?.balanceMicro)
+        }
+        .onChange(of: accountService.balance?.balanceMicro) { _, balanceMicro in
+            ringState.observe(balanceMicro: balanceMicro)
+        }
+    }
+
+    private func updateHover(_ hovering: Bool) {
+        walletHover.isOverTrigger = hovering
+        walletOpenTask?.cancel()
+        guard balanceLevel != .empty || onAddCredits == nil else {
+            if !hovering, !walletPanelPinned { scheduleWalletDismiss() }
+            return
+        }
+        if hovering {
+            walletDismissTask?.cancel()
+            walletOpenTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled else { return }
+                showWalletPanel = true
+            }
+        } else if !walletPanelPinned {
+            scheduleWalletDismiss()
+        }
+    }
+
+    private func handleIndicatorTap() {
+        walletOpenTask?.cancel()
+        walletDismissTask?.cancel()
+        if balanceLevel == .empty, let onAddCredits {
+            showWalletPanel = false
+            walletPanelPinned = false
+            onAddCredits()
+            return
+        }
+        if showWalletPanel && walletPanelPinned {
+            showWalletPanel = false
+            walletPanelPinned = false
+        } else {
+            walletPanelPinned = true
+            showWalletPanel = true
+        }
+    }
+
+    private func scheduleWalletDismiss() {
+        walletOpenTask?.cancel()
+        walletDismissTask?.cancel()
+        guard walletHover.shouldDismiss(isPinned: walletPanelPinned) else { return }
+        walletDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled,
+                walletHover.shouldDismiss(isPinned: walletPanelPinned)
+            else { return }
+            showWalletPanel = false
+        }
+    }
+
+    private func closeWalletPanel() {
+        walletDismissTask?.cancel()
+        walletOpenTask?.cancel()
+        showWalletPanel = false
+        walletPanelPinned = false
+    }
+}
+
+/// The complete 90-degree track across the upper edge of the Credits icon.
+/// Trimming this path maps the balance fraction across the arc itself.
+private struct CreditsUpperArc: Shape {
+    func path(in rect: CGRect) -> Path {
+        let inset: CGFloat = 1.2
+        let arcWidth = max(0, rect.width - inset * 2)
+        let radius = arcWidth / sqrt(2)
+        guard radius > 0 else { return Path() }
+
+        let diagonal = radius / sqrt(2)
+        let center = CGPoint(x: rect.midX, y: rect.minY + inset + radius)
+        let start = CGPoint(x: center.x - diagonal, y: center.y - diagonal)
+        let end = CGPoint(x: center.x + diagonal, y: center.y - diagonal)
+        let controlDistance = radius * 0.55228475
+        let firstControl = CGPoint(
+            x: start.x + controlDistance / sqrt(2),
+            y: start.y - controlDistance / sqrt(2)
+        )
+        let secondControl = CGPoint(
+            x: end.x - controlDistance / sqrt(2),
+            y: end.y - controlDistance / sqrt(2)
+        )
+
+        var path = Path()
+        path.move(to: start)
+        path.addCurve(to: end, control1: firstControl, control2: secondControl)
+        return path
     }
 }

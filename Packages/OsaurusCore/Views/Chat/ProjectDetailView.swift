@@ -3,8 +3,8 @@
 //  osaurus
 //
 //  A project, opened in the chat window's content area from the Projects
-//  lens: a folder of chats. The header names the folder; the list below is
-//  the same `ChatHistoryList` the inspector's History pane uses (same
+//  Projects flyout: a folder of chats. The header names the folder; the list
+//  below reuses the same `ChatHistoryList` as the Chats panel (same
 //  rows, search and multi-select), scoped to the project's members. The
 //  project's settings live in the right rail (`ProjectInspectorPanel`).
 //

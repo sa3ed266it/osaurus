@@ -33,7 +33,7 @@ struct TourAnchorMarkerWindowTeardownTests {
             let host = NSHostingView(
                 rootView: Color.clear
                     .frame(width: 120, height: 40)
-                    .background(TourAnchorMarker(anchor: .historyButton))
+                    .background(TourAnchorMarker(anchor: .leftPanelButton))
             )
             host.frame = NSRect(x: 0, y: 0, width: 320, height: 200)
             window?.contentView = host

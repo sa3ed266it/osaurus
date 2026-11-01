@@ -11,13 +11,13 @@ import SwiftUI
 
 // MARK: - Header Action Button
 
-/// An icon-only button for the toolbar. On macOS 26+ each icon sits on its
-/// own circular Liquid Glass capsule; on earlier systems it relies on the
-/// native toolbar item pill for its background and only renders the icon
-/// with a hover color change.
+/// An icon-only toolbar button with optional circular Liquid Glass styling.
 struct HeaderActionButton: View {
     let icon: String
     let help: String
+    /// Set false for native-style toolbar controls that should show only the
+    /// symbol, active state, and hover treatment.
+    var usesIndividualGlassEffect: Bool = true
     /// Toggle state for buttons that open/close a panel: the icon takes the
     /// accent color and the circle gets a faint accent fill so the open
     /// pane's button reads as pressed. Default off keeps every plain action
@@ -37,12 +37,14 @@ struct HeaderActionButton: View {
         help: String,
         isActive: Bool = false,
         badge: Int? = nil,
+        usesIndividualGlassEffect: Bool = true,
         action: @escaping () -> Void
     ) {
         self.icon = icon
         self.help = help
         self.isActive = isActive
         self.badge = badge
+        self.usesIndividualGlassEffect = usesIndividualGlassEffect
         self.action = action
     }
 
@@ -50,14 +52,7 @@ struct HeaderActionButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(isTinted ? theme.accentColor : theme.secondaryText)
-                .frame(width: 28, height: 28)
-                .background(
-                    Circle().fill(theme.accentColor.opacity(isActive ? (theme.isDark ? 0.22 : 0.14) : 0))
-                )
-                .liquidGlassCircle()
+            iconSurface
                 .overlay(alignment: .topTrailing) {
                     if let badge, badge > 0 {
                         Text(badge > 99 ? "99+" : "\(badge)")
@@ -82,7 +77,25 @@ struct HeaderActionButton: View {
             }
         }
         .help(Text(LocalizedStringKey(help), bundle: .module))
+        .accessibilityLabel(Text(LocalizedStringKey(help), bundle: .module))
         .accessibilityAddTraits(isActive ? .isSelected : [])
+    }
+
+    @ViewBuilder
+    private var iconSurface: some View {
+        let icon = Image(systemName: self.icon)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(isTinted ? theme.accentColor : theme.secondaryText)
+            .frame(width: 28, height: 28)
+            .background(
+                Circle().fill(theme.accentColor.opacity(isActive ? (theme.isDark ? 0.22 : 0.14) : 0))
+            )
+
+        if usesIndividualGlassEffect {
+            icon.liquidGlassCircle()
+        } else {
+            icon
+        }
     }
 }
 
@@ -98,16 +111,6 @@ extension View {
         }
     }
 
-    /// Capsule variant of `liquidGlassCircle` for pill-shaped toolbar
-    /// buttons that carry a text label next to their icon.
-    @ViewBuilder
-    func liquidGlassCapsule() -> some View {
-        if #available(macOS 26.0, *) {
-            self.glassEffect(.regular.interactive(), in: .capsule)
-        } else {
-            self
-        }
-    }
 }
 
 // MARK: - Settings Button

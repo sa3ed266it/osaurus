@@ -388,12 +388,11 @@ public final class ChatWindowManager: NSObject, ObservableObject {
         return nil
     }
 
-    /// ⌘B: hide/show the focused chat window's session sidebar, mirroring
-    /// the toolbar's sidebar button.
-    public func toggleSidebarInFocusedWindow() {
+    /// ⌘B: hide/show the focused chat window's Chats / File Changes panel.
+    public func toggleLeftPanelInFocusedWindow() {
         guard let state = shortcutTargetState else { return }
         withAnimation(state.theme.animationQuick()) {
-            state.toggleSidebar()
+            state.toggleLeftPanel()
         }
     }
 
@@ -773,7 +772,13 @@ public final class ChatWindowManager: NSObject, ObservableObject {
     /// Sync a window's native full-screen state into its `ChatWindowState`
     /// so the content can swap the NSToolbar for the themed in-content header.
     fileprivate func windowFullScreenChanged(id: UUID, isFullScreen: Bool) {
-        windowStates[id]?.isFullScreen = isFullScreen
+        guard let state = windowStates[id] else { return }
+        state.isFullScreen = isFullScreen
+        if let window = nsWindows[id] {
+            updateWindowTopInset(for: window, state: state)
+        } else {
+            state.updateTitlebarContentInset(0)
+        }
     }
 
     // MARK: - Screen fit
@@ -792,8 +797,31 @@ public final class ChatWindowManager: NSObject, ObservableObject {
         return CGSize(width: vf.width, height: vf.height - chrome)
     }
 
+    /// The inset from the window's top edge to AppKit's non-obscured content
+    /// area. Full screen swaps the NSToolbar for an in-content header, so it
+    /// must not reserve the native titlebar strip a second time.
+    static func titlebarContentInset(
+        windowFrameHeight: CGFloat,
+        contentLayoutRect: CGRect,
+        isFullScreen: Bool
+    ) -> CGFloat {
+        guard !isFullScreen else { return 0 }
+        return max(0, windowFrameHeight - contentLayoutRect.maxY)
+    }
+
+    private func updateWindowTopInset(for window: NSWindow, state: ChatWindowState) {
+        state.updateTitlebarContentInset(
+            Self.titlebarContentInset(
+                windowFrameHeight: window.frame.height,
+                contentLayoutRect: window.contentLayoutRect,
+                isFullScreen: state.isFullScreen
+            )
+        )
+    }
+
     /// Clamp `windowState`'s minimum content size to what `screen` can show.
     private func pushMinimumContentSize(for panel: NSWindow, on screen: NSScreen?, windowState: ChatWindowState) {
+        updateWindowTopInset(for: panel, state: windowState)
         windowState.updateMinimumContentSize(
             availableContentSize: Self.availableContentSize(for: panel, on: screen)
         )
@@ -834,6 +862,11 @@ public final class ChatWindowManager: NSObject, ObservableObject {
     fileprivate func windowDidChangeScreen(id: UUID) {
         guard let panel = nsWindows[id], let state = windowStates[id] else { return }
         fitToScreen(panel, windowState: state, repositions: false)
+    }
+
+    fileprivate func windowDidResize(id: UUID) {
+        guard let panel = nsWindows[id], let state = windowStates[id] else { return }
+        updateWindowTopInset(for: panel, state: state)
     }
 
     private var screenParametersCancellable: AnyCancellable?
@@ -1039,17 +1072,22 @@ public final class ChatWindowManager: NSObject, ObservableObject {
     /// window only when none is open.
     public func openHistorySession(_ session: ChatSessionData) {
         if let shownIn = findWindow(bySessionId: session.id), let host = windowStates[shownIn.id] {
+            host.showLeftPanel(.chats)
             host.focusTab(forSessionId: session.id)
             showWindow(id: shownIn.id)
             return
         }
         if let targetId = preferredWindowId(), let target = windowStates[targetId] {
+            target.showLeftPanel(.chats)
             target.openSessionInNewTab(session)
             showWindow(id: targetId)
             return
         }
         let windowId = createWindow(agentId: session.agentId, showImmediately: true)
-        windowStates[windowId]?.openSessionInNewTab(session)
+        if let state = windowStates[windowId] {
+            state.showLeftPanel(.chats)
+            state.openSessionInNewTab(session)
+        }
     }
 
     public func revealTask(_ taskId: UUID) {
@@ -1192,11 +1230,10 @@ public final class ChatWindowManager: NSObject, ObservableObject {
             defer: false
         )
 
-        panel.isOpaque = true
-        // Use the theme's background rather than the system color: in native
-        // full screen the content view no longer extends under the toolbar,
-        // so the titlebar strip exposes the window background directly.
-        panel.backgroundColor = NSColor(windowState.theme.primaryBackground)
+        // Let the root NSVisualEffectView provide the native window glass.
+        // Its themed opaque fallback is applied when Reduce Transparency is on.
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.animationBehavior = .none
         panel.becomesKeyOnlyIfNeeded = false
@@ -1220,16 +1257,19 @@ public final class ChatWindowManager: NSObject, ObservableObject {
         let toolbar = NSToolbar(identifier: "ChatToolbar")
         toolbar.allowsUserCustomization = false
         toolbar.autosavesConfiguration = false
-        // No centered item: the tab strip is leading-aligned and its track
-        // fills the free width; the single flexible space pushes the
-        // action/pin items to the trailing edge.
+        // The tab strip fills the space before the grouped trailing action
+        // buttons, which AppKit pushes to the trailing edge.
 
         let toolbarDelegate = ChatToolbarDelegate(windowState: windowState)
         toolbar.delegate = toolbarDelegate
         panel.chatToolbarDelegate = toolbarDelegate
         panel.chatWindowState = windowState
         panel.toolbar = toolbar
-        panel.toolbarStyle = .unified
+        if #available(macOS 26.0, *) {
+            panel.toolbarStyle = .unifiedCompact
+        } else {
+            panel.toolbarStyle = .unified
+        }
 
         // Set up delegate for lifecycle events
         let delegate = ChatWindowDelegate(windowId: windowId, manager: self)
@@ -1432,6 +1472,7 @@ public final class ChatWindowManager: NSObject, ObservableObject {
 /// same way a fresh window would.
 private struct ChatWindowRootView: View {
     @ObservedObject var windowState: ChatWindowState
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1442,13 +1483,73 @@ private struct ChatWindowRootView: View {
                 .id(ObjectIdentifier(windowState.session))
         }
         .environment(\.theme, windowState.theme)
+        .preferredColorScheme(windowState.theme.isDark ? .dark : .light)
+        .background {
+            ChatWindowGlassBackdrop(
+                isDark: windowState.theme.isDark,
+                reduceTransparency: reduceTransparency,
+                fallbackColor: NSColor(windowState.theme.chatWindowChromeSolidFallback)
+            )
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+        }
     }
 }
 
-/// Themed replacement for the NSToolbar while in native full screen, where
-/// AppKit's toolbar backdrop can't be themed. Mirrors the toolbar layout:
-/// sidebar toggle leading, tab strip centered, the File Changes / History /
-/// Pin row trailing.
+/// Native AppKit glass behind the chat window. Theme appearance and the
+/// opaque accessibility fallback are synchronized whenever the observed
+/// per-window theme or Reduce Transparency setting changes.
+private struct ChatWindowGlassBackdrop: NSViewRepresentable {
+    let isDark: Bool
+    let reduceTransparency: Bool
+    let fallbackColor: NSColor
+
+    func makeNSView(context: Context) -> ChatWindowGlassEffectView {
+        let view = ChatWindowGlassEffectView()
+        view.configure(isDark: isDark, reduceTransparency: reduceTransparency, fallbackColor: fallbackColor)
+        return view
+    }
+
+    func updateNSView(_ view: ChatWindowGlassEffectView, context: Context) {
+        view.configure(isDark: isDark, reduceTransparency: reduceTransparency, fallbackColor: fallbackColor)
+    }
+}
+
+@MainActor
+private final class ChatWindowGlassEffectView: NSVisualEffectView {
+    private var isDark = false
+    private var reduceTransparency = false
+    private var fallbackColor = NSColor.windowBackgroundColor
+
+    func configure(isDark: Bool, reduceTransparency: Bool, fallbackColor: NSColor) {
+        self.isDark = isDark
+        self.reduceTransparency = reduceTransparency
+        self.fallbackColor = fallbackColor
+        material = .underWindowBackground
+        blendingMode = .behindWindow
+        state = .followsWindowActiveState
+        appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
+        isHidden = reduceTransparency
+        synchronizeWindow()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        synchronizeWindow()
+    }
+
+    private func synchronizeWindow() {
+        guard let window else { return }
+        window.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
+        window.isOpaque = reduceTransparency
+        window.backgroundColor = reduceTransparency ? fallbackColor : .clear
+    }
+}
+
+/// SwiftUI header used while native full screen replaces the NSToolbar. It
+/// mirrors the compact toolbar layout and shares the rail's window backdrop:
+/// content-panel toggle leading, tab strip in the middle, and plain actions
+/// trailing. The header and navigation rail reveal the same window backdrop.
 private struct ChatFullScreenHeaderView: View {
     @ObservedObject var windowState: ChatWindowState
 
@@ -1457,14 +1558,15 @@ private struct ChatFullScreenHeaderView: View {
             ChatToolbarSidebarView(windowState: windowState)
             // The track fills the row up to the trailing buttons, like the
             // toolbar item does.
-            // Trailing fallback: two 28pt buttons, their 8pt gap, the HStack
-            // spacing and the row's horizontal padding — until measured.
-            ChatTabStripView(windowState: windowState, leadingChromeWidth: 76, trailingChromeWidth: 84)
+            ChatTabStripView(windowState: windowState, leadingChromeWidth: 76)
             ChatToolbarTrailingView(windowState: windowState)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(windowState.theme.primaryBackground)
+        .background {
+            WindowChromeBackground()
+                .environment(\.theme, windowState.theme)
+        }
     }
 }
 
@@ -1541,33 +1643,32 @@ private final class ChatPanel: NSPanel {
 
 // MARK: - Chat Toolbar
 
-/// Toolbar delegate that places each control in its own `NSToolbarItem`
-/// so macOS applies native per-item styling (pill backgrounds, spacing).
+/// Toolbar delegate that hosts the content-panel toggle, flexible tab strip,
+/// and trailing actions in native toolbar items.
 @MainActor
 private final class ChatToolbarDelegate: NSObject, NSToolbarDelegate {
     fileprivate static let sidebarItem = NSToolbarItem.Identifier("ChatToolbar.sidebar")
-    /// The centered slot. Hosted the agent pill until the pill moved into
-    /// the sidebar's Chats tab; now hosts the chat tab strip. (The old
+    /// The centered slot. Hosted the agent pill until it moved into the
+    /// compact navigation rail; now hosts the chat tab strip. (The old
     /// "ChatToolbar.agent" identifier falls through to `default: nil` if
     /// AppKit ever replays it from stale persisted state.)
     fileprivate static let tabsItem = NSToolbarItem.Identifier("ChatToolbar.tabs")
-    /// The trailing item: File Changes, History and Pin as one row of
-    /// identically sized buttons. Named `pin` for backward identity
-    /// continuity. (The retired "ChatToolbar.action" identifier, which
+    /// The trailing item: New Tab and Pin Window on chat pages, Project
+    /// Settings toggle on project pages. Settings lives in the navigation rail. Named
+    /// `pin` for backward identity continuity. (The retired "ChatToolbar.action" identifier, which
     /// once held the File Changes chip in its own item, falls through to
     /// `default: nil` if AppKit replays it from persisted state.)
     fileprivate static let pinItem = NSToolbarItem.Identifier("ChatToolbar.pin")
 
     /// Layout: sidebar on the leading edge, the tab strip filling the middle,
-    /// the trailing button row on the right. The strip item is flexible (see
+    /// and plain trailing action buttons. The strip item is flexible (see
     /// `makeTabStripItem`), so it doubles as the space that pushes the
     /// trailing item to the right edge.
     /// Any stale identifiers AppKit may have persisted in user defaults
     /// fall through to `default: nil` in `itemForItemIdentifier`, which
     /// renders them as no-ops rather than crashing.
-    // The trailing slot is a SINGLE item. Every button that can hide (File
-    // Changes before the chat touches a file, all of them on the project
-    // page) lives inside it: a hidden item of its own would still reserve
+    // The trailing slot is a SINGLE item. New conversation and Pin hide on
+    // the project page inside it: a hidden item of its own would reserve
     // AppKit's inter-item spacing and leave a dead gap at the right edge,
     // and the buttons would not share one spacing rule.
     private static let itemIdentifiers: [NSToolbarItem.Identifier] = [
@@ -1677,20 +1778,23 @@ private final class ChatToolbarDelegate: NSObject, NSToolbarDelegate {
 
 // MARK: - Toolbar Item Views
 
-/// Sidebar toggle button.
+/// Toggle for the collapsible panel beside the permanent navigation rail.
 private struct ChatToolbarSidebarView: View {
     @ObservedObject var windowState: ChatWindowState
 
     var body: some View {
         HeaderActionButton(
             icon: "sidebar.left",
-            help: windowState.isSidebarVisible ? "Hide sidebar" : "Show sidebar",
+            help: windowState.isLeftPanelOpen ? "Hide sidebar" : "Show sidebar",
+            isActive: windowState.isLeftPanelOpen,
+            usesIndividualGlassEffect: false,
             action: {
                 withAnimation(windowState.theme.animationQuick()) {
-                    windowState.toggleSidebar()
+                    windowState.toggleLeftPanel()
                 }
             }
         )
+        .background(TourAnchorMarker(anchor: .leftPanelButton))
         .environment(\.theme, windowState.theme)
     }
 }
@@ -1700,8 +1804,8 @@ extension Notification.Name {
     /// Posted by the toolbar's back button to reopen the current chat's
     /// project page in the window identified by `userInfo["windowId"]`.
     static let chatToolbarBackToProject = Notification.Name("chatToolbarBackToProject")
-    /// Posted by the `/agent` slash command to pop open the toolbar's agent
-    /// picker for the window identified in `userInfo["windowId"]`.
+    /// Posted by the `/agent` slash command to open the compact rail's agent
+    /// switcher for the window identified in `userInfo["windowId"]`.
     static let chatToolbarOpenAgentPicker = Notification.Name("chatToolbarOpenAgentPicker")
     /// Posted by `ChatSessionsManager` when a session's project membership
     /// changes (or a whole project is deleted), so open chat windows update
@@ -1712,51 +1816,53 @@ extension Notification.Name {
     static let chatSessionProjectDidChange = Notification.Name("chatSessionProjectDidChange")
 }
 
-/// The single trailing toolbar item: the inspector toggle and Pin Window
-/// as one row of `HeaderActionButton`s with one spacing rule. The toggle
-/// mirrors the sidebar button at the other end of the toolbar: it opens
-/// the right-hand rail (on the pane it last showed; the rail's own lens
-/// bar switches between File Changes and History) or closes it, rendering
-/// active while open. While closed it carries the count of files this chat
-/// changed. Everything hides on the project page, which has no chat to
-/// inspect or pin.
+/// The single trailing toolbar item: New Tab and Pin on chat pages, or the
+/// project-specific Settings panel toggle on project pages. Chat History and
+/// File Changes are selected in the left content panel.
 ///
-/// Must observe `windowState` directly: with a plain `let`, SwiftUI sees
-/// the unchanged object reference and skips this body when only a
-/// published property (e.g. `fileChangesCount` after an undo) changed.
+/// Must observe `windowState` directly so changes to its published project
+/// settings visibility and per-window toolbar state invalidate this body.
 private struct ChatToolbarTrailingView: View {
     @ObservedObject var windowState: ChatWindowState
 
     var body: some View {
-        HStack(spacing: 8) {
-            // One right-rail toggle for both kinds of content: the chat
-            // inspector for a chat, Project Settings for a project. Only
-            // the window pin is chat-only chrome.
-            let isProject = windowState.isProjectPageVisible
-            let isOpen = windowState.isRightRailOpen
-            HeaderActionButton(
-                icon: "sidebar.right",
-                help: railToggleHelp(isProject: isProject, isOpen: isOpen),
-                isActive: isOpen,
-                badge: isProject ? nil : windowState.inspectorBadgeCount,
-                action: {
-                    withAnimation(windowState.theme.animationQuick()) {
-                        if isProject {
+        trailingActionGroup
+            .environment(\.theme, windowState.theme)
+    }
+
+    @ViewBuilder
+    private var trailingActionGroup: some View {
+        let isProject = windowState.isProjectPageVisible
+        let projectSettingsOpen = windowState.isProjectSettingsOpen
+        HStack(spacing: 0) {
+            if !isProject {
+                HeaderActionButton(
+                    icon: "square.and.pencil",
+                    help: "New Tab",
+                    usesIndividualGlassEffect: false,
+                    action: { windowState.newTab() }
+                )
+            }
+
+            if isProject {
+                HeaderActionButton(
+                    icon: "sidebar.right",
+                    help: projectSettingsOpen ? "Hide project settings" : "Show project settings",
+                    isActive: projectSettingsOpen,
+                    usesIndividualGlassEffect: false,
+                    action: {
+                        withAnimation(windowState.theme.animationQuick()) {
                             windowState.toggleProjectInspector()
-                        } else {
-                            windowState.toggleInspector()
                         }
                     }
-                }
-            )
-            .accessibilityLabel(railToggleAccessibilityLabel(isProject: isProject, isOpen: isOpen))
-            // Tour spotlight anchor (invisible; reports the button's frame).
-            .background(TourAnchorMarker(anchor: .historyButton))
+                )
+            }
 
             if !isProject {
                 HeaderActionButton(
                     icon: windowState.isWindowPinned ? "pin.fill" : "pin",
                     help: windowState.isWindowPinned ? "Unpin Window" : "Pin Window",
+                    usesIndividualGlassEffect: false,
                     action: {
                         windowState.isWindowPinned.toggle()
                         ChatWindowManager.shared.setWindowPinned(
@@ -1764,25 +1870,11 @@ private struct ChatToolbarTrailingView: View {
                     }
                 )
             }
+
         }
-        .environment(\.theme, windowState.theme)
+        .padding(.horizontal, 4)
     }
 
-    /// Key of the toggle's tooltip (a `HeaderActionButton.help` string).
-    private func railToggleHelp(isProject: Bool, isOpen: Bool) -> String {
-        switch (isProject, isOpen) {
-        case (true, true): return "Hide project settings"
-        case (true, false): return "Show project settings"
-        case (false, true): return "Hide inspector"
-        case (false, false): return "Show inspector"
-        }
-    }
-
-    private func railToggleAccessibilityLabel(isProject: Bool, isOpen: Bool) -> Text {
-        let base = Text(LocalizedStringKey(railToggleHelp(isProject: isProject, isOpen: isOpen)), bundle: .module)
-        guard !isProject, let count = windowState.inspectorBadgeCount else { return base }
-        return base + Text(", ") + Text("\(count) files changed", bundle: .module)
-    }
 }
 
 // MARK: - Window Delegate
@@ -1806,6 +1898,10 @@ private final class ChatWindowDelegate: NSObject, NSWindowDelegate {
     /// screen and keep the frame inside it.
     func windowDidChangeScreen(_ notification: Notification) {
         manager?.windowDidChangeScreen(id: windowId)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        manager?.windowDidResize(id: windowId)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
