@@ -90,6 +90,10 @@ struct FloatingInputCard: View {
     /// composer's NSTextView.
     @AppStorage(ComposerSpellCheckSetting.defaultsKey)
     private var spellCheckEnabled: Bool = ComposerSpellCheckSetting.defaultValue
+    /// Settings ▸ Conversation ▸ Collapse Long Pastes. When off, pastes of
+    /// any size go straight into the composer as text.
+    @AppStorage(ComposerPasteCollapseSetting.defaultsKey)
+    private var collapseLongPastes: Bool = ComposerPasteCollapseSetting.defaultValue
     /// Set after a manual model change in a non-empty conversation. The
     /// warning is advisory: the user may keep the selected model or start a
     /// clean chat whose first prefix is built for it.
@@ -283,6 +287,7 @@ struct FloatingInputCard: View {
     /// file, not published state, so a change there would not redraw the
     /// chip. Bumped on `.agentUpdated`; the harness lookups read it.
     @State private var harnessConfigRevision = 0
+    @State private var reasoningCapabilityRevision = 0
     @ObservedObject private var recentFolders = RecentFoldersStore.shared
     // Deliberately NOT `@ObservedObject`: sandbox provisioning publishes
     // per-progress-tick during runtime downloads. Clipboard monitoring
@@ -2599,6 +2604,38 @@ extension FloatingInputCard {
         agentManager.effectiveGenerationSettings(for: effectiveAgentId)?.hasReasoningOverride == true
     }
 
+    private var reasoningSelectionNeedsChoice: Bool {
+        _ = reasoningCapabilityRevision
+        guard let model = selectedModel, !isRemoteAgentRun,
+            let settings = agentManager.effectiveGenerationSettings(for: effectiveAgentId),
+            settings.hasReasoningOverride
+        else { return false }
+        let capability: LocalReasoningCapability.Capability
+        if isSelectedModelLocal {
+            guard let resolved = LocalReasoningCapability.capabilityForPresentation(forModelId: model)
+            else { return false }
+            capability = resolved
+        } else {
+            capability = .none
+        }
+        let choices = AgentGenerationReasoningChoices.resolved(modelID: model,
+            localCapability: capability, efforts: inlineEffortCapabilities, options: activeProfileOptions)
+        return choices.reasoningIssue(settings: settings) != nil
+    }
+
+    private func refreshReasoningSelectionCapability() async {
+        guard let model = selectedModel, isSelectedModelLocal, !isRemoteAgentRun,
+            hasAgentReasoningOverride else { return }
+        _ = await LocalReasoningCapability.resolveForDispatch(modelId: model)
+        guard !Task.isCancelled, selectedModel == model else { return }
+        // Known non-reasoning models also need a repaint after a cold cache miss.
+        reasoningCapabilityRevision &+= 1
+    }
+
+    private var reasoningSelectionMessage: String? {
+        reasoningSelectionNeedsChoice ? L("Choose a supported reasoning setting.") : nil
+    }
+
     /// The reasoning suffix the model chip should display ("· Extra High",
     /// "· Instruct"): the explicit persisted choice, otherwise the
     /// catalog/profile default (display-only; an unset option sends no
@@ -2606,6 +2643,7 @@ extension FloatingInputCard {
     /// and static profiles with a segmented reasoning option.
     private var inlineReasoningSuffix: String? {
         guard let model = selectedModel else { return nil }
+        if reasoningSelectionNeedsChoice { return L("Choose reasoning") }
         return ModelProfileRegistry.inlineReasoningSuffixLabel(
             for: model,
             values: effectiveReasoningOptions
@@ -2620,6 +2658,7 @@ extension FloatingInputCard {
     private var inlineThinkingEnabled: Bool? {
         guard let model = selectedModel,
             !isRemoteAgentRun,
+            !reasoningSelectionNeedsChoice,
             inlineReasoningSuffix == nil,
             let option = ModelProfileRegistry.profile(for: model)?.thinkingOption,
             activeProfileOptions.contains(where: { $0.id == option.id }),
@@ -3219,6 +3258,9 @@ extension FloatingInputCard {
                 }
             }
         }
+        .task(id: "\(selectedModel ?? "")|\(hasAgentReasoningOverride)") {
+            await refreshReasoningSelectionCapability()
+        }
     }
 
     private var builtInModelChipLabel: some View {
@@ -3287,7 +3329,7 @@ extension FloatingInputCard {
             options.append(mtpOption)
         }
         let thinking = modelPickerThinkingControl(for: model)
-        guard !options.isEmpty || thinking != nil else { return nil }
+        guard !options.isEmpty || thinking != nil || reasoningSelectionNeedsChoice else { return nil }
 
         // Display-only defaults: the catalog default for capability-enriched
         // effort, otherwise the static profile's defaults.
@@ -3363,7 +3405,8 @@ extension FloatingInputCard {
                         ModelOptionsStore.shared.saveOptions(updated, for: model)
                     }
                 }
-            }
+            },
+            reasoningValidationMessage: reasoningSelectionMessage
         )
     }
 
@@ -3389,7 +3432,7 @@ extension FloatingInputCard {
         )
         return ModelPickerThinkingControl(
             isEnabled: effectiveThinkingEnabled(for: model),
-            isExplicit: explicitEnabled != nil,
+            isExplicit: explicitEnabled != nil || reasoningSelectionNeedsChoice,
             onSetEnabled: { enabled in
                 // Deferred write for the same reason as the generic option
                 // rows: the popover's anchor (the model chip) renders the
@@ -3399,7 +3442,8 @@ extension FloatingInputCard {
                     persistThinkingOverride(enabled, for: model)
                 }
             },
-            supportsUnspecifiedDefault: LocalReasoningCapability.capability(forModelId: model).preservesOmittedThinking
+            supportsUnspecifiedDefault: LocalReasoningCapability.capability(forModelId: model).preservesOmittedThinking,
+            selectionIsValid: !reasoningSelectionNeedsChoice
         )
     }
 
@@ -3976,8 +4020,12 @@ extension FloatingInputCard {
 
     // MARK: - Clipboard Chip
 
+    private func shouldCollapsePastedText(_ text: String) -> Bool {
+        collapseLongPastes && text.utf8.count >= Self.pastedContentThreshold
+    }
+
     private func pasteClipboardTextToInput(_ text: String) {
-        if text.utf8.count >= Self.pastedContentThreshold {
+        if shouldCollapsePastedText(text) {
             withAnimation(theme.springAnimation()) {
                 pendingAttachments.append(.pastedContent(text))
             }
@@ -3991,7 +4039,7 @@ extension FloatingInputCard {
 
         switch content {
         case .text(let text):
-            if text.utf8.count >= Self.pastedContentThreshold {
+            if shouldCollapsePastedText(text) {
                 // Large paste → convert to a "pasted content" attachment.
                 // Lets the user view / remove the snippet without polluting
                 // the input field with hundreds of lines of text.
@@ -5807,7 +5855,11 @@ extension FloatingInputCard {
             onArrowDown: { handleInputArrowDown() },
             onEscape: (showSlashPopup || showAtPopup) ? { handlePopupEscape() } : nil,
             onPasteText: { pasted in
-                guard pasted.utf8.count >= Self.pastedContentThreshold else { return false }
+                // Off in Settings ▸ Conversation ▸ Collapse Long Pastes: return false so
+                // the text view inserts the paste as plain text. Dictation tools that
+                // paste and then read the field back over Accessibility need this
+                // (#3271).
+                guard shouldCollapsePastedText(pasted) else { return false }
                 withAnimation(theme.springAnimation()) {
                     pendingAttachments.append(.pastedContent(pasted))
                 }
